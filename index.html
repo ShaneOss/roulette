@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pixel 7 Pro Ballistics Tracker - Sphere Filter</title>
+    <title>Pixel 7 Pro Ballistics Tracker - Elliptical View</title>
     <style>
         body { 
             margin: 0; 
@@ -59,14 +59,12 @@
 <body>
 
     <div id="hud">
-        <h3>BALLISTICS CALCULATOR</h3>
+        <h3>ELLIPTICAL BALLISTICS TRACKER</h3>
         <div class="metric">
             LAST NUMBER: 
-            <select id="lastNumSelect">
-                <!-- Populated dynamically in numerical order -->
-            </select>
+            <select id="lastNumSelect"></select>
         </div>
-        <div class="metric" id="status">STATUS: TAP WHEEL TO CENTER</div>
+        <div class="metric" id="status">STATUS: TAP OVAL CENTER</div>
         <div class="metric" id="velocity">INITIAL VELOCITY: 0 px/s</div>
         <div class="metric highlight" id="prediction">TARGET SECTOR: WAITING...</div>
     </div>
@@ -75,17 +73,16 @@
     <canvas id="output"></canvas>
 
     <script>
-        // Official European Wheel Pocket Order (Clockwise physical layout for math calculations)
+        // Official European Wheel Pocket Order (Clockwise physical layout)
         const europeanWheel = [
             0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 
             13, 36, 11, 30, 8, 23, 10, 5, 24, 16, 33, 1, 
             20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3
         ];
 
-        // Populate dropdown menu in clean numerical order (0 to 36)
+        // Populate dropdown menu in numerical order (0 to 36)
         const selectEl = document.getElementById('lastNumSelect');
-        const sortedNumbers = Array.from({length: 37}, (_, i) => i);
-        sortedNumbers.forEach(num => {
+        Array.from({length: 37}, (_, i) => i).forEach(num => {
             let opt = document.createElement('option');
             opt.value = num;
             opt.text = num;
@@ -101,8 +98,13 @@
         let launchDetected = false;
         let missingFrames = 0;
 
-        // Expanded default zone to fit the outer track
-        let wideZone = { cx: 640, cy: 360, outer: 180, inner: 100 };
+        // Elliptical zone parameters to match camera perspective tilt
+        // rx = horizontal radius, ry = vertical radius (squashed for perspective)
+        let trackZone = { 
+            cx: 640, cy: 360, 
+            rxOuter: 220, ryOuter: 140, 
+            rxInner: 150, ryInner: 95 
+        };
 
         async function initCamera() {
             try {
@@ -117,8 +119,8 @@
                 video.onloadedmetadata = () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    wideZone.cx = canvas.width / 2;
-                    wideZone.cy = canvas.height / 2;
+                    trackZone.cx = canvas.width / 2;
+                    trackZone.cy = canvas.height / 2;
                     requestAnimationFrame(processFrame);
                 };
             } catch (err) {
@@ -126,12 +128,12 @@
             }
         }
 
-        // Tap-to-center calibration
+        // Tap anywhere on the screen to center the elliptical tracking zone
         window.addEventListener('click', (e) => {
             if (e.target.tagName === 'SELECT') return;
 
-            wideZone.cx = e.clientX * (canvas.width / window.innerWidth);
-            wideZone.cy = e.clientY * (canvas.height / window.innerHeight);
+            trackZone.cx = e.clientX * (canvas.width / window.innerWidth);
+            trackZone.cy = e.clientY * (canvas.height / window.innerHeight);
             launchDetected = false;
             missingFrames = 0;
         });
@@ -149,21 +151,30 @@
 
             let sumX = 0, sumY = 0, count = 0;
 
-            // Scan inside the annular track ring
-            for (let y = Math.floor(wideZone.cy - wideZone.outer); y < wideZone.cy + wideZone.outer; y += 2) {
-                for (let x = Math.floor(wideZone.cx - wideZone.outer); x < wideZone.cx + wideZone.outer; x += 2) {
+            // Scan inside the perspective-correct elliptical track ring
+            let scanXMin = Math.floor(trackZone.cx - trackZone.rxOuter);
+            let scanXMax = Math.ceil(trackZone.cx + trackZone.rxOuter);
+            let scanYMin = Math.floor(trackZone.cy - trackZone.ryOuter);
+            let scanYMax = Math.ceil(trackZone.cy + trackZone.ryOuter);
+
+            for (let y = scanYMin; y < scanYMax; y += 2) {
+                for (let x = scanXMin; x < scanXMax; x += 2) {
                     if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) continue;
                     
-                    let dx = x - wideZone.cx;
-                    let dy = y - wideZone.cy;
-                    let dist = Math.hypot(dx, dy);
+                    let dx = x - trackZone.cx;
+                    let dy = y - trackZone.cy;
 
-                    if (dist >= wideZone.inner && dist <= wideZone.outer) {
+                    // Ellipse boundary equations
+                    let outerCheck = (dx * dx) / (trackZone.rxOuter * trackZone.rxOuter) + (dy * dy) / (trackZone.ryOuter * trackZone.ryOuter);
+                    let innerCheck = (dx * dx) / (trackZone.rxInner * trackZone.rxInner) + (dy * dy) / (trackZone.ryInner * trackZone.ryInner);
+
+                    // Must be inside outer ellipse AND outside inner ellipse
+                    if (outerCheck <= 1.0 && innerCheck >= 1.0) {
                         let i = (y * canvas.width + x) * 4;
                         let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
                         let diff = Math.abs(r - prevFrameData[i]) + Math.abs(g - prevFrameData[i+1]) + Math.abs(b - prevFrameData[i+2]);
 
-                        // Strict high brightness + movement change
+                        // Strict brightness + movement check for the ball, ignoring shirts/lighting
                         if (r > 200 && g > 200 && b > 200 && diff > 60) {
                             sumX += x;
                             sumY += y;
@@ -175,16 +186,16 @@
 
             prevFrameData.set(pixels);
 
-            // Draw alignment target ring (Cyan)
+            // Draw Perspective-Correct Cyan Ellipse Guides on HUD
             ctx.strokeStyle = '#00ffcc';
             ctx.lineWidth = 2;
+            
             ctx.beginPath();
-            ctx.arc(wideZone.cx, wideZone.cy, wideZone.outer, 0, 2 * Math.PI);
-            ctx.arc(wideZone.cx, wideZone.cy, wideZone.inner, 0, 2 * Math.PI);
+            ctx.ellipse(trackZone.cx, trackZone.cy, trackZone.rxOuter, trackZone.ryOuter, 0, 0, 2 * Math.PI);
+            ctx.ellipse(trackZone.cx, trackZone.cy, trackZone.rxInner, trackZone.ryInner, 0, 0, 2 * Math.PI);
             ctx.stroke();
 
-            // STRICT SPHERE FILTER: count must be between 3 and 25 pixels.
-            // This completely ignores large objects like shirts, hands, or background lighting changes.
+            // Sphere size validation filter (3 to 25 pixels)
             if (count >= 3 && count <= 25) {
                 missingFrames = 0; 
                 let currentX = sumX / count;
@@ -195,21 +206,17 @@
                     if (dt > 0) {
                         let velocity = Math.round(Math.hypot(currentX - prevX, currentY - prevY) / dt);
                         
-                        // High velocity threshold to capture the initial ball release spin
                         if (velocity > 300 && !launchDetected) {
                             launchDetected = true;
                             document.getElementById('status').innerText = "STATUS: BALL LAUNCH LOCKED";
                             document.getElementById('velocity').innerText = `INITIAL VELOCITY: ${velocity} px/s`;
                             
-                            // Get selected last winning number from dropdown
                             let lastNum = parseInt(document.getElementById('lastNumSelect').value);
                             let lastIndex = europeanWheel.indexOf(lastNum);
 
-                            // Calculate target pocket offset based on launch velocity decay mapping
                             let pocketOffset = Math.floor(velocity / 35) % europeanWheel.length;
                             let targetIndex = (lastIndex + pocketOffset) % europeanWheel.length;
 
-                            // Build a 5-pocket neighborhood (2 left, target, 2 right)
                             let p1 = europeanWheel[(targetIndex - 2 + europeanWheel.length) % europeanWheel.length];
                             let p2 = europeanWheel[(targetIndex - 1 + europeanWheel.length) % europeanWheel.length];
                             let target = europeanWheel[targetIndex];
@@ -233,7 +240,7 @@
             } else {
                 if (launchDetected) {
                     missingFrames++;
-                    if (missingFrames > 40) { // Auto-reset when the ball settles into a pocket
+                    if (missingFrames > 40) {
                         launchDetected = false;
                         prevX = null;
                         prevY = null;
@@ -254,5 +261,3 @@
     </script>
 </body>
 </html>
-
-```
