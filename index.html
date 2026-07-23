@@ -23,11 +23,12 @@
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="output"></canvas>
 
-    <script>
+<script>
         const video = document.getElementById('webcam');
         const canvas = document.getElementById('output');
         const ctx = canvas.getContext('2d');
         
+        let prevFrameData = null;
         let prevX = null, prevY = null, prevTime = null;
 
         async function initCamera() {
@@ -49,17 +50,27 @@
         function processFrame(timestamp) {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             
-            // Simple color thresholding simulation for high-contrast white ball detection
             let frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             let pixels = frameData.data;
             
+            if (!prevFrameData) {
+                prevFrameData = new Uint8ClampedArray(pixels);
+                requestAnimationFrame(processFrame);
+                return;
+            }
+
             let sumX = 0, sumY = 0, count = 0;
 
-            // Scanning every 4th pixel for performance optimization on mobile browser
+            // Scan every 4th pixel for performance
             for (let i = 0; i < pixels.length; i += 16) {
                 let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
-                // Isolate bright white objects (the ball on the track)
-                if (r > 200 && g > 200 && b > 200) {
+                
+                // Must be bright white AND have changed position since the last frame (motion detection)
+                let diffR = Math.abs(r - prevFrameData[i]);
+                let diffG = Math.abs(g - prevFrameData[i+1]);
+                let diffB = Math.abs(b - prevFrameData[i+2]);
+                
+                if (r > 200 && g > 200 && b > 200 && (diffR + diffG + diffB > 100)) {
                     let idx = i / 4;
                     sumX += idx % canvas.width;
                     sumY += Math.floor(idx / canvas.width);
@@ -67,31 +78,33 @@
                 }
             }
 
-            if (count > 5) {
+            // Save current frame as previous for the next loop tick
+            prevFrameData.set(pixels);
+
+            if (count > 2 && count < 100) { // Filter out large moving blocks, keep small ball size
                 let currentX = sumX / count;
                 let currentY = sumY / count;
                 
                 if (prevX !== null && prevTime !== null) {
-                    let dt = (timestamp - prevTime) / 1000; // seconds
+                    let dt = (timestamp - prevTime) / 1000;
                     if (dt > 0) {
                         let distance = Math.hypot(currentX - prevX, currentY - prevY);
                         let velocity = Math.round(distance / dt);
                         
-                        document.getElementById('status').innerText = "STATUS: LOCKED";
+                        document.getElementById('status').innerText = "STATUS: BALL LOCKED";
                         document.getElementById('velocity').innerText = `VELOCITY: ${velocity} px/s`;
                         
-                        // Kinematic mock trigger simulation based on deceleration profile
                         if (velocity < 400 && velocity > 50) {
                             document.getElementById('prediction').innerText = "PRED SECTOR: 17, 34, 6, 27, 13";
                         } else {
-                            document.getElementById('prediction').innerText = "PRED SECTOR: TRACKING DECAY...";
+                            document.getElementById('prediction').innerText = "PRED SECTOR: CALCULATING DECAY...";
                         }
                         
-                        // Draw HUD reticle on canvas
+                        // Draw tracking reticle over the moving ball
                         ctx.strokeStyle = '#00ffcc';
                         ctx.lineWidth = 3;
                         ctx.beginPath();
-                        ctx.arc(currentX, currentY, 20, 0, 2 * Math.PI);
+                        ctx.arc(currentX, currentY, 25, 0, 2 * Math.PI);
                         ctx.stroke();
                     }
                 }
@@ -99,7 +112,7 @@
                 prevY = currentY;
                 prevTime = timestamp;
             } else {
-                document.getElementById('status').innerText = "STATUS: SEARCHING FOR BALL...";
+                document.getElementById('status').innerText = "STATUS: WAITING FOR BALL MOTION...";
             }
 
             requestAnimationFrame(processFrame);
