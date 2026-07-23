@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixel Ballistics Tracker</title>
+    <style>
+        body { margin: 0; background: #111; color: #fff; font-family: monospace; text-align: center; }
+        video, canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: cover; }
+        #hud { position: absolute; top: 20px; left: 20px; z-index: 10; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px; text-align: left; border: 1px solid #333; }
+        .metric { color: #00ffcc; font-size: 16px; margin: 5px 0; }
+    </style>
+</head>
+<body>
+
+    <div id="hud">
+        <h3>BALLISTICS HUD</h3>
+        <div class="metric" id="status">STATUS: SEARCHING...</div>
+        <div class="metric" id="velocity">VELOCITY: 0 px/s</div>
+        <div class="metric" id="prediction">PRED SECTOR: --</div>
+    </div>
+
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="output"></canvas>
+
+    <script>
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('output');
+        const ctx = canvas.getContext('2d');
+        
+        let prevX = null, prevY = null, prevTime = null;
+
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+                });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    requestAnimationFrame(processFrame);
+                };
+            } catch (err) {
+                alert("Camera access denied or unavailable: " + err);
+            }
+        }
+
+        function processFrame(timestamp) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            // Simple color thresholding simulation for high-contrast white ball detection
+            let frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            let pixels = frameData.data;
+            
+            let sumX = 0, sumY = 0, count = 0;
+
+            // Scanning every 4th pixel for performance optimization on mobile browser
+            for (let i = 0; i < pixels.length; i += 16) {
+                let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
+                // Isolate bright white objects (the ball on the track)
+                if (r > 200 && g > 200 && b > 200) {
+                    let idx = i / 4;
+                    sumX += idx % canvas.width;
+                    sumY += Math.floor(idx / canvas.width);
+                    count++;
+                }
+            }
+
+            if (count > 5) {
+                let currentX = sumX / count;
+                let currentY = sumY / count;
+                
+                if (prevX !== null && prevTime !== null) {
+                    let dt = (timestamp - prevTime) / 1000; // seconds
+                    if (dt > 0) {
+                        let distance = Math.hypot(currentX - prevX, currentY - prevY);
+                        let velocity = Math.round(distance / dt);
+                        
+                        document.getElementById('status').innerText = "STATUS: LOCKED";
+                        document.getElementById('velocity').innerText = `VELOCITY: ${velocity} px/s`;
+                        
+                        // Kinematic mock trigger simulation based on deceleration profile
+                        if (velocity < 400 && velocity > 50) {
+                            document.getElementById('prediction').innerText = "PRED SECTOR: 17, 34, 6, 27, 13";
+                        } else {
+                            document.getElementById('prediction').innerText = "PRED SECTOR: TRACKING DECAY...";
+                        }
+                        
+                        // Draw HUD reticle on canvas
+                        ctx.strokeStyle = '#00ffcc';
+                        ctx.lineWidth = 3;
+                        ctx.beginPath();
+                        ctx.arc(currentX, currentY, 20, 0, 2 * Math.PI);
+                        ctx.stroke();
+                    }
+                }
+                prevX = currentX;
+                prevY = currentY;
+                prevTime = timestamp;
+            } else {
+                document.getElementById('status').innerText = "STATUS: SEARCHING FOR BALL...";
+            }
+
+            requestAnimationFrame(processFrame);
+        }
+
+        initCamera();
+    </script>
+</body>
+</html>
