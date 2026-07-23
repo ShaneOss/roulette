@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pixel 7 Pro Ballistics Tracker - Live Array</title>
+    <title>Pixel 7 Pro Ballistics Tracker</title>
     <style>
         body { 
             margin: 0; 
@@ -63,7 +63,7 @@
         <div class="metric">
             LAST NUMBER: 
             <select id="lastNumSelect">
-                <!-- Populated dynamically with European wheel numbers -->
+                <!-- Populated dynamically in numerical order -->
             </select>
         </div>
         <div class="metric" id="status">STATUS: TAP WHEEL TO CENTER</div>
@@ -75,16 +75,17 @@
     <canvas id="output"></canvas>
 
     <script>
-        // Official European Wheel Pocket Order (Clockwise)
+        // Official European Wheel Pocket Order (Clockwise physical layout for math calculations)
         const europeanWheel = [
             0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 
             13, 36, 11, 30, 8, 23, 10, 5, 24, 16, 33, 1, 
             20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3
         ];
 
-        // Populate the dropdown menu
+        // Populate dropdown menu in clean numerical order (0 to 36)
         const selectEl = document.getElementById('lastNumSelect');
-        europeanWheel.forEach(num => {
+        const sortedNumbers = Array.from({length: 37}, (_, i) => i);
+        sortedNumbers.forEach(num => {
             let opt = document.createElement('option');
             opt.value = num;
             opt.text = num;
@@ -98,7 +99,7 @@
         let prevFrameData = null;
         let prevX = null, prevY = null, prevTime = null;
         let launchDetected = false;
-        let lowVelocityFrames = 0;
+        let missingFrames = 0;
 
         // Expanded default zone to fit the outer track
         let wideZone = { cx: 640, cy: 360, outer: 180, inner: 100 };
@@ -127,13 +128,12 @@
 
         // Tap-to-center calibration
         window.addEventListener('click', (e) => {
-            // Ignore clicks if clicking directly on the dropdown menu
             if (e.target.tagName === 'SELECT') return;
 
             wideZone.cx = e.clientX * (canvas.width / window.innerWidth);
             wideZone.cy = e.clientY * (canvas.height / window.innerHeight);
             launchDetected = false;
-            lowVelocityFrames = 0;
+            missingFrames = 0;
         });
 
         function processFrame(timestamp) {
@@ -182,7 +182,8 @@
             ctx.arc(wideZone.cx, wideZone.cy, wideZone.inner, 0, 2 * Math.PI);
             ctx.stroke();
 
-            if (count > 1 && count < 80) {
+            if (count > 1 && count < 90) {
+                missingFrames = 0; // Reset missing counter since ball is visible
                 let currentX = sumX / count;
                 let currentY = sumY / count;
 
@@ -193,7 +194,6 @@
                         
                         if (velocity > 250 && !launchDetected) {
                             launchDetected = true;
-                            lowVelocityFrames = 0;
                             document.getElementById('status').innerText = "STATUS: BALL LAUNCH LOCKED";
                             document.getElementById('velocity').innerText = `INITIAL VELOCITY: ${velocity} px/s`;
                             
@@ -213,15 +213,6 @@
                             let p4 = europeanWheel[(targetIndex + 2) % europeanWheel.length];
 
                             document.getElementById('prediction').innerText = `TARGET SECTOR: ${p1} - ${p2} - [ ${target} ] - ${p3} - ${p4}`;
-                        } else if (launchDetected && velocity < 80) {
-                            lowVelocityFrames++;
-                            if (lowVelocityFrames > 30) {
-                                launchDetected = false;
-                                prevX = null;
-                                prevY = null;
-                                document.getElementById('status').innerText = "STATUS: READY FOR NEXT SPIN...";
-                                document.getElementById('prediction').innerText = "TARGET SECTOR: WAITING...";
-                            }
                         }
                         
                         // Active ball tracking reticle (Pink)
@@ -236,7 +227,19 @@
                 prevY = currentY;
                 prevTime = timestamp;
             } else {
-                if (!launchDetected) {
+                // If ball tracking is lost or round ends, count missing frames to auto-reset
+                if (launchDetected) {
+                    missingFrames++;
+                    if (missingFrames > 40) { // ~0.7 seconds of missing ball data triggers reset
+                        launchDetected = false;
+                        prevX = null;
+                        prevY = null;
+                        missingFrames = 0;
+                        document.getElementById('status').innerText = "STATUS: READY FOR NEXT SPIN...";
+                        document.getElementById('prediction').innerText = "TARGET SECTOR: WAITING...";
+                        document.getElementById('velocity').innerText = "INITIAL VELOCITY: 0 px/s";
+                    }
+                } else {
                     document.getElementById('status').innerText = "STATUS: WAITING FOR DEALER SPIN...";
                 }
             }
@@ -248,3 +251,5 @@
     </script>
 </body>
 </html>
+
+```
