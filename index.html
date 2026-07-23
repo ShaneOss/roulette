@@ -1,12 +1,3 @@
-Here are the fixes for all three issues:
-
-1. **Expanding and Adjusting the Ring Size:** The default outer and inner radius values have been expanded (`outer: 180, inner: 100`) so they properly frame the outer wooden track where the ball spins in the wide view.
-2. **Dynamic Predictions:** The target sector is no longer hardcoded to the same numbers. It now dynamically calculates and shifts based on the initial launch velocity (`velocity % sectors.length`), ensuring unique predictions for every spin.
-3. **Fixed Reset Bug:** The script no longer gets stuck on "BALL LOCKED." A frame-drop counter has been added so that when the ball slows down or drops into the pocket, the system automatically resets itself after a short delay and arms for the next round.
-
-Here is the complete, updated code:
-
-```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
