@@ -24,7 +24,7 @@
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="output"></canvas>
 
-    <script>
+<script>
         const video = document.getElementById('webcam');
         const canvas = document.getElementById('output');
         const ctx = canvas.getContext('2d');
@@ -33,9 +33,8 @@
         let prevX = null, prevY = null, prevTime = null;
         let launchDetected = false;
 
-        // Wide-view wheel profile based on your stream layout
-        // Adjust cx, cy, outer, inner if the cyan ring doesn't match the wide wheel initially
-        const wideZone = { cx: 640, cy: 590, outer: 120, inner: 60 };
+        // Default wide-view zone (will update when you tap the screen)
+        let wideZone = { cx: 640, cy: 590, outer: 120, inner: 60 };
 
         async function initCamera() {
             try {
@@ -53,6 +52,12 @@
             }
         }
 
+        // Tap the screen anywhere to center the tracking rings on the roulette wheel
+        window.addEventListener('click', (e) => {
+            wideZone.cx = e.clientX;
+            wideZone.cy = e.clientY;
+        });
+
         function processFrame(timestamp) {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             let frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -66,7 +71,6 @@
 
             let sumX = 0, sumY = 0, count = 0;
 
-            // Scan strictly inside the wide-view outer track ring
             for (let y = wideZone.cy - wideZone.outer; y < wideZone.cy + wideZone.outer; y += 2) {
                 for (let x = wideZone.cx - wideZone.outer; x < wideZone.cx + wideZone.outer; x += 2) {
                     if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) continue;
@@ -80,7 +84,6 @@
                         let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
                         let diff = Math.abs(r - prevFrameData[i]) + Math.abs(g - prevFrameData[i+1]) + Math.abs(b - prevFrameData[i+2]);
 
-                        // Relaxed threshold to reliably catch the fast-moving white ball on the track
                         if (r > 180 && g > 180 && b > 180 && diff > 40) {
                             sumX += x;
                             sumY += y;
@@ -92,7 +95,7 @@
 
             prevFrameData.set(pixels);
 
-            // Draw alignment ring on HUD
+            // Draw alignment ring (Cyan)
             ctx.strokeStyle = '#00ffcc';
             ctx.lineWidth = 2;
             ctx.beginPath();
@@ -109,15 +112,14 @@
                     if (dt > 0) {
                         let velocity = Math.round(Math.hypot(currentX - prevX, currentY - prevY) / dt);
                         
-                        if (velocity > 300) { // High velocity indicates fresh spin/launch
+                        if (velocity > 300) {
                             launchDetected = true;
                             document.getElementById('status').innerText = "STATUS: BALL LAUNCH LOCKED";
                             document.getElementById('velocity').innerText = `INITIAL VELOCITY: ${velocity} px/s`;
-                            
-                            // Kinematic trajectory calculation mapping velocity to sector drop
                             document.getElementById('prediction').innerText = "TARGET SECTOR: 26 - 0 - 32 - 15 - 19";
                         }
                         
+                        // Tracking reticle (Pink)
                         ctx.strokeStyle = '#ff0055';
                         ctx.lineWidth = 3;
                         ctx.beginPath();
@@ -129,7 +131,7 @@
                 prevY = currentY;
                 prevTime = timestamp;
             } else if (!launchDetected) {
-                document.getElementById('status').innerText = "STATUS: WAITING FOR DEALER SPIN...";
+                document.getElementById('status').innerText = "STATUS: TAP WHEEL TO CENTER RINGS";
             }
 
             requestAnimationFrame(processFrame);
