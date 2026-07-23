@@ -9,12 +9,10 @@
         body { margin:0; background:#000; color:#0f0; font-family:monospace; overflow:hidden; }
         video { display: none; }
         canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; }
-        #hud { position: absolute; top: 12px; left: 12px; background: rgba(10,20,10,0.92); padding: 14px; border: 2px solid #0f0; border-radius: 8px; z-index: 100; width: 320px; }
+        #hud { position: absolute; top: 12px; left: 12px; background: rgba(10,20,10,0.95); padding: 14px; border: 2px solid #0f0; border-radius: 8px; z-index: 100; width: 340px; }
         .metric { margin: 8px 0; font-size: 15px; }
-        .highlight { color: #ff0; font-weight: bold; }
         button, select { background:#111; color:#0f0; border:1px solid #0f0; padding:8px 12px; margin:5px 3px; border-radius:5px; cursor:pointer; }
-        #calib { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.97); padding:25px; border:3px solid #ff0; border-radius:10px; z-index:200; display:none; text-align:center; max-width:90%; }
-        .plot-container { position:absolute; bottom:15px; right:15px; width:420px; height:200px; background:rgba(0,0,0,0.85); border:1px solid #0f0; padding:8px; border-radius:6px; }
+        #status { color: #ff0; }
     </style>
 </head>
 <body>
@@ -23,177 +21,76 @@
 
     <div id="hud">
         <h3>🔬 ROULETTE VISION PRO</h3>
-        <div class="metric" id="status">STATUS: Loading OpenCV...</div>
+        <div class="metric" id="status">STATUS: Starting camera...</div>
         <div class="metric" id="fps">FPS: --</div>
-        <div class="metric" id="ballInfo">BALL: -- px/s | -- RPM</div>
-        <div class="metric" id="wheelInfo">WHEEL: -- RPM</div>
-        <div class="metric highlight" id="prediction">PREDICTION: WAITING FOR SPIN</div>
-        <div class="metric" id="confidence">CONFIDENCE: --%</div>
+        <div class="metric" id="ballInfo">BALL SPEED: -- px/s</div>
+        <div class="metric highlight" id="prediction">PREDICTION: WAITING...</div>
         
-        <button onclick="startCalibration()">📐 Calibrate Wheel</button>
+        <button onclick="startCalibration()">Calibrate Wheel</button>
         <button onclick="resetSession()">Reset</button>
         <select id="lastNumSelect"></select>
     </div>
 
-    <div id="calib">
-        <h3>4-Point Calibration</h3>
-        <p>Tap the four corners of the roulette wheel in order:<br>
-        <b>TL → TR → BR → BL</b></p>
-        <p>Points captured: <span id="pointCount">0</span>/4</p>
-        <button onclick="finishCalibration()">Finish Calibration</button>
-    </div>
-
-    <div class="plot-container">
-        <canvas id="speedPlot"></canvas>
-    </div>
-
     <script>
-        // ==================== CORE DATA ====================
         const europeanWheel = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3];
 
-        let cv = null, video, canvas, ctx;
-        let perspectiveMatrix = null;
-        let calibrationPoints = [];
-        let isCalibrating = false;
-        let isTracking = false;
-
-        // Kalman Filters
-        class Kalman1D {
-            constructor(R=0.1, Q=3) {
-                this.R = R; this.Q = Q;
-                this.x = 0; this.P = 1;
-            }
-            update(z) {
-                const K = this.P / (this.P + this.R);
-                this.x += K * (z - this.x);
-                this.P = (1 - K) * this.P + this.Q;
-                return this.x;
-            }
-        }
-        const kfX = new Kalman1D(), kfY = new Kalman1D(), kfSpeed = new Kalman1D(0.4, 6);
-
-        let ball = { x:0, y:0, vx:0, vy:0, speed:0 };
+        let video, canvas, ctx;
         let prevBall = null;
-        let velocityHistory = [];
-        let spinHistory = [];
+        let ball = {x:0, y:0, speed:0};
         let lastTime = null;
         let fps = 0, frameCount = 0, fpsStart = Date.now();
+        let isCalibrating = false;
 
-        let speedChart, speedData = [], timeLabels = [];
-
-        // ==================== INITIALIZATION ====================
-        async function init() {
-            video = document.getElementById('webcam');
-            canvas = document.getElementById('output');
-            ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-            // Load OpenCV.js
-            const opencvScript = document.createElement('script');
-            opencvScript.src = 'https://docs.opencv.org/4.8.0/opencv.js';
-            opencvScript.onload = () => {
-                cv = window.cv;
-                document.getElementById('status').innerHTML = '✅ OpenCV Ready - Calibrate Wheel';
-            };
-            document.head.appendChild(opencvScript);
-
-            // Camera
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "environment", width: {ideal:1280}, height:{ideal:720} }
-            });
-            video.srcObject = stream;
-            video.onloadedmetadata = () => {
-                canvas.width = video.videoWidth || 1280;
-                canvas.height = video.videoHeight || 720;
-                initChart();
-                requestAnimationFrame(loop);
-            };
-
-            // Populate last number
-            const sel = document.getElementById('lastNumSelect');
-            europeanWheel.forEach(n => {
-                const o = document.createElement('option');
-                o.value = n; o.textContent = n;
-                sel.appendChild(o);
-            });
-        }
-
-        function initChart() {
-            const ctxPlot = document.getElementById('speedPlot').getContext('2d');
-            speedChart = new Chart(ctxPlot, {
-                type: 'line',
-                data: {
-                    labels: timeLabels,
-                    datasets: [{
-                        label: 'Ball Speed (px/s)',
-                        data: speedData,
-                        borderColor: '#0f0',
-                        tension: 0.3
-                    }]
-                },
-                options: { responsive:true, maintainAspectRatio:false, scales:{ y:{ beginAtZero:true } } }
-            });
-        }
-
-        // ==================== CALIBRATION ====================
-        function startCalibration() {
-            isCalibrating = true;
-            calibrationPoints = [];
-            document.getElementById('calib').style.display = 'block';
-            document.getElementById('pointCount').textContent = '0';
-        }
-
-        function finishCalibration() {
-            if (calibrationPoints.length === 4 && cv) {
-                const src = cv.matFromArray(4, 1, cv.CV_32FC2, calibrationPoints.flat());
-                const dst = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,canvas.width,0,canvas.width,canvas.height,0,canvas.height]);
-                perspectiveMatrix = cv.getPerspectiveTransform(src, dst);
-                src.delete(); dst.delete();
-            }
-            document.getElementById('calib').style.display = 'none';
-            isCalibrating = false;
-            isTracking = true;
-        }
-
-        canvas.addEventListener('click', e => {
-            if (!isCalibrating) return;
-            const rect = canvas.getBoundingClientRect();
-            const x = Math.round((e.clientX - rect.left) * canvas.width / rect.width);
-            const y = Math.round((e.clientY - rect.top) * canvas.height / rect.height);
-            calibrationPoints.push(x, y);
-            document.getElementById('pointCount').textContent = calibrationPoints.length / 2;
-        });
-
-        // ==================== MAIN PROCESSING LOOP ====================
-        function loop(ts) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-            if (isTracking) {
-                detectMotion();
-            } else if (isCalibrating) {
-                // Draw calibration guides
-                ctx.strokeStyle = '#ff0';
-                ctx.lineWidth = 3;
-                calibrationPoints.forEach((p,i) => {
-                    if (i%2===0) ctx.fillRect(p-8, calibrationPoints[i+1]-8, 16, 16);
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        facingMode: "environment", 
+                        width: { ideal: 1280 }, 
+                        height: { ideal: 720 } 
+                    }
                 });
+                video = document.getElementById('webcam');
+                video.srcObject = stream;
+                
+                video.onloadedmetadata = () => {
+                    canvas = document.getElementById('output');
+                    ctx = canvas.getContext('2d', { willReadFrequently: true });
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    
+                    document.getElementById('status').innerHTML = '✅ CAMERA READY - Tap "Calibrate Wheel"';
+                    requestAnimationFrame(processFrame);
+                };
+            } catch (err) {
+                document.getElementById('status').innerHTML = '❌ CAMERA ERROR: ' + err.message;
+                console.error(err);
             }
-
-            updateMetrics();
-            requestAnimationFrame(loop);
         }
 
-        function detectMotion() {
-            // Advanced motion + brightness detection
-            const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const data = frame.data;
+        function processFrame() {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            if (!isCalibrating) {
+                detectBall();
+            }
 
+            updateHUD();
+            requestAnimationFrame(processFrame);
+        }
+
+        function detectBall() {
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            
             let sumX = 0, sumY = 0, count = 0;
 
-            for (let y = 100; y < canvas.height - 100; y += 3) {
-                for (let x = 100; x < canvas.width - 100; x += 3) {
+            for (let y = 80; y < canvas.height - 80; y += 4) {
+                for (let x = 80; x < canvas.width - 80; x += 4) {
                     const i = (y * canvas.width + x) * 4;
                     const r = data[i], g = data[i+1], b = data[i+2];
-                    if (r > 200 && g > 200 && b > 180) {
+                    
+                    if (r > 210 && g > 210 && b > 190) {
                         sumX += x;
                         sumY += y;
                         count++;
@@ -201,76 +98,71 @@
                 }
             }
 
-            if (count > 4) {
-                const cx = sumX / count;
-                const cy = sumY / count;
+            if (count >= 5) {
+                const currentX = sumX / count;
+                const currentY = sumY / count;
 
-                if (prevBall) {
-                    const dt = (Date.now() - (lastTime || Date.now())) / 1000 || 0.033;
-                    const rawSpeed = Math.hypot(cx - prevBall.x, cy - prevBall.y) / dt;
+                if (prevBall && lastTime) {
+                    const dt = (Date.now() - lastTime) / 1000;
+                    if (dt > 0) {
+                        const speed = Math.hypot(currentX - prevBall.x, currentY - prevBall.y) / dt;
+                        ball.speed = Math.round(speed);
+                        ball.x = currentX;
+                        ball.y = currentY;
 
-                    ball.x = kfX.update(cx);
-                    ball.y = kfY.update(cy);
-                    ball.speed = kfSpeed.update(rawSpeed);
-
-                    velocityHistory.push(ball.speed);
-                    if (velocityHistory.length > 25) velocityHistory.shift();
+                        ctx.strokeStyle = '#f00';
+                        ctx.lineWidth = 6;
+                        ctx.beginPath();
+                        ctx.arc(currentX, currentY, 22, 0, Math.PI * 2);
+                        ctx.stroke();
+                    }
                 }
 
-                prevBall = {x: cx, y: cy};
+                prevBall = {x: currentX, y: currentY};
                 lastTime = Date.now();
-
-                // Draw tracked ball
-                ctx.strokeStyle = '#f00';
-                ctx.lineWidth = 5;
-                ctx.beginPath();
-                ctx.arc(ball.x, ball.y, 18, 0, Math.PI*2);
-                ctx.stroke();
             }
         }
 
-        function updateMetrics() {
-            // FPS
+        function updateHUD() {
             frameCount++;
-            if (Date.now() - fpsStart > 800) {
-                fps = Math.round(frameCount * 1000 / (Date.now() - fpsStart));
+            if (Date.now() - fpsStart > 1000) {
+                fps = frameCount;
                 frameCount = 0;
                 fpsStart = Date.now();
             }
 
             document.getElementById('fps').textContent = `FPS: ${fps}`;
-            document.getElementById('ballInfo').textContent = 
-                `BALL: ${Math.round(ball.speed)} px/s | ${Math.round(ball.speed/12)} RPM`;
+            document.getElementById('ballInfo').textContent = `BALL SPEED: ${ball.speed} px/s`;
 
-            // Simple prediction
-            if (ball.speed > 180) {
+            if (ball.speed > 250) {
                 const lastNum = parseInt(document.getElementById('lastNumSelect').value) || 0;
                 const idx = europeanWheel.indexOf(lastNum);
-                const offset = Math.floor(ball.speed / 38) % 37;
-                const targetIdx = (idx + offset) % 37;
-                const target = europeanWheel[targetIdx];
+                const offset = Math.floor(ball.speed / 42) % 37;
+                const target = europeanWheel[(idx + offset) % 37];
                 document.getElementById('prediction').innerHTML = `PREDICTION → <b>${target}</b>`;
-                document.getElementById('confidence').textContent = `CONFIDENCE: ${ball.speed > 350 ? '82' : '65'}%`;
             }
+        }
 
-            // Update chart
-            if (speedData.length > 40) {
-                speedData.shift();
-                timeLabels.shift();
-            }
-            speedData.push(Math.round(ball.speed));
-            timeLabels.push('');
-            if (speedChart) speedChart.update('none');
+        function startCalibration() {
+            isCalibrating = true;
+            alert("Calibration mode ON\n\nTap the 4 corners of the wheel:\nTop-Left → Top-Right → Bottom-Right → Bottom-Left");
         }
 
         function resetSession() {
-            ball.speed = 0;
-            velocityHistory = [];
             prevBall = null;
+            ball.speed = 0;
         }
 
-        // Start everything
-        init();
+        // Populate last number selector
+        const sel = document.getElementById('lastNumSelect');
+        europeanWheel.forEach(n => {
+            const opt = document.createElement('option');
+            opt.value = n; opt.textContent = n;
+            sel.appendChild(opt);
+        });
+
+        // Start the app
+        initCamera();
     </script>
 </body>
 </html>
