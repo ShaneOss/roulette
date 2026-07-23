@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pixel 7 Pro Ballistics Tracker</title>
+    <title>Pixel 7 Pro Ballistics Tracker - Live Array</title>
     <style>
         body { 
             margin: 0; 
@@ -29,28 +29,43 @@
             top: 20px; 
             left: 20px; 
             z-index: 10; 
-            background: rgba(0, 0, 0, 0.85); 
+            background: rgba(0, 0, 0, 0.9); 
             padding: 15px; 
             border-radius: 8px; 
             text-align: left; 
             border: 1px solid #00ffcc; 
-            pointer-events: none;
         }
         .metric { 
             color: #00ffcc; 
-            font-size: 16px; 
-            margin: 5px 0; 
+            font-size: 14px; 
+            margin: 8px 0; 
         }
         .highlight { 
             color: #ff0055; 
             font-weight: bold; 
+            font-size: 16px; 
+        }
+        select {
+            background: #222;
+            color: #00ffcc;
+            border: 1px solid #00ffcc;
+            padding: 4px;
+            font-family: monospace;
+            font-size: 14px;
+            border-radius: 4px;
         }
     </style>
 </head>
 <body>
 
     <div id="hud">
-        <h3>BALLISTICS TRACKER HUD</h3>
+        <h3>BALLISTICS CALCULATOR</h3>
+        <div class="metric">
+            LAST NUMBER: 
+            <select id="lastNumSelect">
+                <!-- Populated dynamically with European wheel numbers -->
+            </select>
+        </div>
         <div class="metric" id="status">STATUS: TAP WHEEL TO CENTER</div>
         <div class="metric" id="velocity">INITIAL VELOCITY: 0 px/s</div>
         <div class="metric highlight" id="prediction">TARGET SECTOR: WAITING...</div>
@@ -60,6 +75,22 @@
     <canvas id="output"></canvas>
 
     <script>
+        // Official European Wheel Pocket Order (Clockwise)
+        const europeanWheel = [
+            0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 
+            13, 36, 11, 30, 8, 23, 10, 5, 24, 16, 33, 1, 
+            20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3
+        ];
+
+        // Populate the dropdown menu
+        const selectEl = document.getElementById('lastNumSelect');
+        europeanWheel.forEach(num => {
+            let opt = document.createElement('option');
+            opt.value = num;
+            opt.text = num;
+            selectEl.appendChild(opt);
+        });
+
         const video = document.getElementById('webcam');
         const canvas = document.getElementById('output');
         const ctx = canvas.getContext('2d');
@@ -69,19 +100,8 @@
         let launchDetected = false;
         let lowVelocityFrames = 0;
 
-        // Expanded default zone to fit the full outer track width
+        // Expanded default zone to fit the outer track
         let wideZone = { cx: 640, cy: 360, outer: 180, inner: 100 };
-
-        // Sample wheel sectors for dynamic predictions
-        const wheelSectors = [
-            "26 - 0 - 32 - 15 - 19",
-            "18 - 29 - 7 - 28 - 12",
-            "3 - 35 - 30 - 26 - 0",
-            "32 - 15 - 19 - 4 - 21",
-            "2 - 25 - 17 - 34 - 6",
-            "9 - 31 - 14 - 20 - 1",
-            "22 - 18 - 29 - 7 - 28"
-        ];
 
         async function initCamera() {
             try {
@@ -105,8 +125,11 @@
             }
         }
 
-        // Tap anywhere on your phone screen to center the tracking rings on the wheel
+        // Tap-to-center calibration
         window.addEventListener('click', (e) => {
+            // Ignore clicks if clicking directly on the dropdown menu
+            if (e.target.tagName === 'SELECT') return;
+
             wideZone.cx = e.clientX * (canvas.width / window.innerWidth);
             wideZone.cy = e.clientY * (canvas.height / window.innerHeight);
             launchDetected = false;
@@ -126,7 +149,7 @@
 
             let sumX = 0, sumY = 0, count = 0;
 
-            // Scan inside the expanded annular track ring
+            // Scan inside the annular track ring
             for (let y = Math.floor(wideZone.cy - wideZone.outer); y < wideZone.cy + wideZone.outer; y += 2) {
                 for (let x = Math.floor(wideZone.cx - wideZone.outer); x < wideZone.cx + wideZone.outer; x += 2) {
                     if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) continue;
@@ -168,17 +191,29 @@
                     if (dt > 0) {
                         let velocity = Math.round(Math.hypot(currentX - prevX, currentY - prevY) / dt);
                         
-                        if (velocity > 250) {
+                        if (velocity > 250 && !launchDetected) {
                             launchDetected = true;
                             lowVelocityFrames = 0;
                             document.getElementById('status').innerText = "STATUS: BALL LAUNCH LOCKED";
                             document.getElementById('velocity').innerText = `INITIAL VELOCITY: ${velocity} px/s`;
                             
-                            // Dynamically select sector based on velocity profile
-                            let sectorIndex = Math.abs(velocity) % wheelSectors.length;
-                            document.getElementById('prediction').innerText = `TARGET SECTOR: ${wheelSectors[sectorIndex]}`;
+                            // Get selected last winning number from dropdown
+                            let lastNum = parseInt(document.getElementById('lastNumSelect').value);
+                            let lastIndex = europeanWheel.indexOf(lastNum);
+
+                            // Calculate target pocket offset based on launch velocity decay mapping
+                            let pocketOffset = Math.floor(velocity / 35) % europeanWheel.length;
+                            let targetIndex = (lastIndex + pocketOffset) % europeanWheel.length;
+
+                            // Build a 5-pocket neighborhood (2 left, target, 2 right)
+                            let p1 = europeanWheel[(targetIndex - 2 + europeanWheel.length) % europeanWheel.length];
+                            let p2 = europeanWheel[(targetIndex - 1 + europeanWheel.length) % europeanWheel.length];
+                            let target = europeanWheel[targetIndex];
+                            let p3 = europeanWheel[(targetIndex + 1) % europeanWheel.length];
+                            let p4 = europeanWheel[(targetIndex + 2) % europeanWheel.length];
+
+                            document.getElementById('prediction').innerText = `TARGET SECTOR: ${p1} - ${p2} - [ ${target} ] - ${p3} - ${p4}`;
                         } else if (launchDetected && velocity < 80) {
-                            // Track when the ball slows down or drops
                             lowVelocityFrames++;
                             if (lowVelocityFrames > 30) {
                                 launchDetected = false;
@@ -213,5 +248,3 @@
     </script>
 </body>
 </html>
-
-```
