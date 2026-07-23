@@ -3,29 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Roulette Vision Pro - Stable</title>
+    <title>Roulette Vision Pro - Stable + Angle</title>
     <style>
-        body { margin:0; background:#000; color:#0f0; font-family:monospace; overflow:hidden; }
-        video { display:none; }
-        canvas { position:absolute; top:0; left:0; width:100vw; height:100vh; }
-        #hud { position:absolute; top:15px; left:15px; background:rgba(0,0,0,0.9); padding:15px; border:2px solid #0f0; border-radius:8px; z-index:100; width:380px; }
-        #calib { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.95); padding:25px; border:3px solid #ff0; z-index:200; display:none; text-align:center; }
-        button { background:#111; color:#0f0; border:1px solid #0f0; padding:8px 12px; margin:5px; border-radius:5px; cursor:pointer; }
+        body { margin:0; background:#111; color:#fff; font-family:monospace; overflow:hidden; }
+        video { display: none; }
+        canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: cover; }
+        #hud {
+            position: absolute;
+            top: 20px; left: 20px;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            text-align: left;
+            border: 1px solid #00ffcc;
+        }
+        .metric { color: #00ffcc; font-size: 14px; margin: 8px 0; }
+        .highlight { color: #ff0055; font-weight: bold; font-size: 16px; }
     </style>
 </head>
 <body>
     <div id="hud">
-        <h3>ROULETTE VISION PRO</h3>
-        <div class="metric" id="status">STATUS: Starting camera...</div>
-        <div class="metric" id="ballInfo">SPEED: -- px/s | ANGLE: --°</div>
-        <div class="metric highlight" id="prediction">PREDICTION: WAITING...</div>
-        <button onclick="startCalibration()">Calibrate Wheel</button>
-    </div>
-
-    <div id="calib">
-        <h3>4-Point Calibration</h3>
-        <p>Tap 4 corners of the wheel:<br>Top-Left → Top-Right → Bottom-Right → Bottom-Left</p>
-        <button onclick="finishCalibration()">Finish</button>
+        <h3>STABLE + WHEEL ANGLE</h3>
+        <div class="metric" id="status">STATUS: TAP TO CENTER</div>
+        <div class="metric" id="velocity">VELOCITY: 0 px/s</div>
+        <div class="metric" id="angleInfo">ANGLE: --°</div>
+        <div class="metric highlight" id="prediction">TARGET SECTOR: WAITING...</div>
     </div>
 
     <video id="webcam" autoplay playsinline muted></video>
@@ -34,107 +37,119 @@
     <script>
         const europeanWheel = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3];
 
-        let video, canvas, ctx;
-        let calibrationPoints = [];
-        let isCalibrating = false;
-        let trackCenter = { x: 640, y: 360 };
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('output');
+        const ctx = canvas.getContext('2d');
 
-        let prevPos = null;
-        let prevTime = null;
-        let currentAngle = 0;
-        let ballSpeed = 0;
+        let prevFrameData = null;
+        let prevX = null, prevY = null, prevTime = null;
+        let launchDetected = false;
+        let trackZone = { cx: 640, cy: 360, rxOuter: 260, ryOuter: 85 };
 
         async function initCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment', width: {ideal:1280}, height:{ideal:720} }
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
                 });
-                video = document.getElementById('webcam');
                 video.srcObject = stream;
-                
                 video.onloadedmetadata = () => {
-                    canvas = document.getElementById('output');
-                    ctx = canvas.getContext('2d');
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    trackCenter.x = canvas.width / 2;
-                    trackCenter.y = canvas.height / 2;
-                    document.getElementById('status').innerHTML = '✅ CAMERA READY - Calibrate if needed';
+                    trackZone.cx = canvas.width / 2;
+                    trackZone.cy = canvas.height / 2;
+                    document.getElementById('status').innerText = "STATUS: TAP TO CENTER ZONE";
                     requestAnimationFrame(processFrame);
                 };
             } catch (err) {
-                document.getElementById('status').innerHTML = '❌ CAMERA FAILED: ' + err.message;
+                alert("Camera error: " + err.message);
             }
         }
 
-        function startCalibration() {
-            isCalibrating = true;
-            calibrationPoints = [];
-            document.getElementById('calib').style.display = 'block';
-        }
-
-        function finishCalibration() {
-            if (calibrationPoints.length === 4) {
-                trackCenter.x = (calibrationPoints[0] + calibrationPoints[2] + calibrationPoints[4] + calibrationPoints[6]) / 4;
-                trackCenter.y = (calibrationPoints[1] + calibrationPoints[3] + calibrationPoints[5] + calibrationPoints[7]) / 4;
-            }
-            document.getElementById('calib').style.display = 'none';
-            isCalibrating = false;
-        }
-
-        canvas.addEventListener('click', e => {
-            if (!isCalibrating) return;
-            const rect = canvas.getBoundingClientRect();
-            const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
-            const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
-            calibrationPoints.push(x, y);
+        window.addEventListener('click', (e) => {
+            if (e.target.tagName === 'SELECT') return;
+            trackZone.cx = e.clientX * (canvas.width / window.innerWidth);
+            trackZone.cy = e.clientY * (canvas.height / window.innerHeight);
         });
 
-        function getAngle(x, y) {
-            return ((Math.atan2(y - trackCenter.y, x - trackCenter.x) * 180 / Math.PI) + 360) % 360;
+        function getWheelAngle(x, y) {
+            const dx = x - trackZone.cx;
+            const dy = y - trackZone.cy;
+            let angle = Math.atan2(dy, dx) * (180 / Math.PI);
+            return (angle + 360) % 360;
         }
 
-        function processFrame() {
+        function processFrame(timestamp) {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            let frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            let pixels = frameData.data;
 
-            const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+            if (!prevFrameData) {
+                prevFrameData = new Uint8ClampedArray(pixels);
+                requestAnimationFrame(processFrame);
+                return;
+            }
+
             let sumX = 0, sumY = 0, count = 0;
+            const {cx, cy, rxOuter, ryOuter} = trackZone;
 
-            for (let y = 80; y < canvas.height - 80; y += 3) {
-                for (let x = 80; x < canvas.width - 80; x += 3) {
-                    const i = (y * canvas.width + x) * 4;
-                    if (data[i] > 210 && data[i+1] > 210 && data[i+2] > 200) {
-                        sumX += x;
-                        sumY += y;
-                        count++;
+            for (let y = Math.floor(cy - ryOuter); y < Math.ceil(cy + ryOuter); y += 2) {
+                for (let x = Math.floor(cx - rxOuter); x < Math.ceil(cx + rxOuter); x += 2) {
+                    if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) continue;
+                    const dx = x - cx;
+                    const dy = y - cy;
+                    if ((dx*dx)/(rxOuter*rxOuter) + (dy*dy)/(ryOuter*ryOuter) <= 1) {
+                        let i = (y * canvas.width + x) * 4;
+                        let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
+                        let diff = Math.abs(r - prevFrameData[i]) + Math.abs(g - prevFrameData[i+1]) + Math.abs(b - prevFrameData[i+2]);
+                        if (r > 200 && g > 200 && b > 200 && diff > 50) {
+                            sumX += x;
+                            sumY += y;
+                            count++;
+                        }
                     }
                 }
             }
 
-            if (count > 6) {
-                const cx = sumX / count;
-                const cy = sumY / count;
-                const angle = getAngle(cx, cy);
+            prevFrameData.set(pixels);
 
-                if (prevPos) {
-                    const dt = (Date.now() - prevTime) / 1000;
-                    ballSpeed = Math.hypot(cx - prevPos.x, cy - prevPos.y) / dt;
+            ctx.strokeStyle = '#00ffcc';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.ellipse(trackZone.cx, trackZone.cy, trackZone.rxOuter, trackZone.ryOuter, 0, 0, 2 * Math.PI);
+            ctx.stroke();
+
+            if (count >= 4) {
+                let currentX = sumX / count;
+                let currentY = sumY / count;
+                let angle = getWheelAngle(currentX, currentY);
+
+                if (prevX !== null && prevTime !== null) {
+                    let dt = (timestamp - prevTime) / 1000;
+                    if (dt > 0) {
+                        let velocity = Math.round(Math.hypot(currentX - prevX, currentY - prevY) / dt);
+
+                        document.getElementById('velocity').innerText = `VELOCITY: ${velocity} px/s`;
+                        document.getElementById('angleInfo').innerText = `ANGLE: ${angle.toFixed(0)}°`;
+
+                        if (velocity > 280) {
+                            const sectorIndex = Math.floor((360 - angle) % 360 / (360 / 37));
+                            const target = europeanWheel[sectorIndex % 37];
+                            document.getElementById('prediction').innerText = `TARGET SECTOR: ${target}`;
+                        }
+                    }
                 }
 
-                currentAngle = angle;
-
-                ctx.strokeStyle = '#f00';
-                ctx.lineWidth = 6;
+                ctx.strokeStyle = '#ff0055';
+                ctx.lineWidth = 4;
                 ctx.beginPath();
-                ctx.arc(cx, cy, 20, 0, Math.PI*2);
+                ctx.arc(currentX, currentY, 15, 0, 2 * Math.PI);
                 ctx.stroke();
 
-                prevPos = {x: cx, y: cy};
-                prevTime = Date.now();
-
-                document.getElementById('ballInfo').innerHTML = `SPEED: ${Math.round(ballSpeed)} px/s | ANGLE: ${angle.toFixed(0)}°`;
-                const sector = europeanWheel[Math.floor((360 - angle) % 360 / (360/37))];
-                document.getElementById('prediction').innerHTML = `SECTOR: <b>${sector}</b>`;
+                prevX = currentX;
+                prevY = currentY;
+                prevTime = timestamp;
+            } else {
+                document.getElementById('status').innerText = "STATUS: WAITING FOR BALL...";
             }
 
             requestAnimationFrame(processFrame);
