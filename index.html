@@ -3,30 +3,30 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Roulette Vision Pro - OpenCV Enhanced</title>
+    <title>Roulette Vision Pro - OpenCV + Wheel Tracking</title>
     <script src="https://docs.opencv.org/4.8.0/opencv.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         body { margin:0; background:#000; color:#0f0; font-family:monospace; overflow:hidden; }
         video { display:none; }
         canvas { position:absolute; top:0; left:0; width:100vw; height:100vh; }
-        #hud { position:absolute; top:15px; left:15px; background:rgba(0,0,0,0.9); padding:15px; border:2px solid #0f0; border-radius:8px; z-index:100; width:380px; }
-        #calib { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.95); padding:20px; border:3px solid #ff0; z-index:200; display:none; text-align:center; }
+        #hud { position:absolute; top:15px; left:15px; background:rgba(0,0,0,0.9); padding:15px; border:2px solid #0f0; border-radius:8px; z-index:100; width:400px; }
+        #calib { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.95); padding:25px; border:3px solid #ff0; z-index:200; display:none; text-align:center; max-width:90%; }
         button { background:#111; color:#0f0; border:1px solid #0f0; padding:8px 12px; margin:5px; border-radius:5px; }
     </style>
 </head>
 <body>
     <div id="hud">
-        <h3>🎰 ROULETTE VISION PRO - OPENCV</h3>
+        <h3>🎰 ROULETTE VISION PRO</h3>
         <div class="metric" id="status">STATUS: Loading OpenCV...</div>
         <div class="metric" id="ballInfo">SPEED: -- px/s | ANGLE: --°</div>
         <div class="metric highlight" id="prediction">PREDICTION: WAITING...</div>
-        <button onclick="startCalibration()">Start Calibration</button>
+        <button onclick="startCalibration()">Calibrate Wheel (4 points)</button>
     </div>
 
     <div id="calib">
-        <h3>4-Point Wheel Calibration</h3>
-        <p>Tap the 4 corners of the roulette wheel (TL → TR → BR → BL)</p>
+        <h3>4-Point Calibration</h3>
+        <p>Tap the four corners of the roulette wheel in order:<br>TL → TR → BR → BL</p>
         <button onclick="finishCalibration()">Finish Calibration</button>
     </div>
 
@@ -43,13 +43,15 @@
 
         const europeanWheel = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3];
 
+        let prevPos = null;
+        let prevTime = null;
+        let currentAngle = 0;
+        let ballSpeed = 0;
+
         async function init() {
             video = document.getElementById('webcam');
             canvas = document.getElementById('output');
             ctx = canvas.getContext('2d');
-
-            // Load OpenCV
-            document.getElementById('status').textContent = "Loading OpenCV.js... (this may take a moment)";
 
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: { facingMode: 'environment', width: {ideal:1280}, height:{ideal:720} }
@@ -61,15 +63,15 @@
             };
         }
 
-        window.cv = null; // Global for OpenCV
-        const opencvScript = document.createElement('script');
-        opencvScript.src = 'https://docs.opencv.org/4.8.0/opencv.js';
-        opencvScript.onload = () => {
+        // Load OpenCV
+        const script = document.createElement('script');
+        script.src = 'https://docs.opencv.org/4.8.0/opencv.js';
+        script.onload = () => {
             cv = window.cv;
             cvReady = true;
-            document.getElementById('status').innerHTML = '✅ OpenCV Ready - Calibrate Wheel';
+            document.getElementById('status').innerHTML = '✅ OpenCV Ready - Calibrate the wheel';
         };
-        document.head.appendChild(opencvScript);
+        document.head.appendChild(script);
 
         function startCalibration() {
             isCalibrating = true;
@@ -79,28 +81,77 @@
 
         function finishCalibration() {
             if (calibrationPoints.length === 4 && cv) {
-                const srcPoints = cv.matFromArray(4, 1, cv.CV_32FC2, calibrationPoints.flat());
-                const dstPoints = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0, canvas.width,0, canvas.width,canvas.height, 0,canvas.height]);
-                perspectiveMatrix = cv.getPerspectiveTransform(srcPoints, dstPoints);
-                srcPoints.delete();
-                dstPoints.delete();
+                const src = cv.matFromArray(4, 1, cv.CV_32FC2, calibrationPoints.flat());
+                const dst = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,canvas.width,0,canvas.width,canvas.height,0,canvas.height]);
+                perspectiveMatrix = cv.getPerspectiveTransform(src, dst);
+                src.delete(); dst.delete();
             }
             document.getElementById('calib').style.display = 'none';
             isCalibrating = false;
         }
 
-        canvas.addEventListener('click', (e) => {
+        canvas.addEventListener('click', e => {
             if (!isCalibrating) return;
             const rect = canvas.getBoundingClientRect();
-            const x = Math.round((e.clientX - rect.left) * canvas.width / rect.width);
-            const y = Math.round((e.clientY - rect.top) * canvas.height / rect.height);
+            const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
+            const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
             calibrationPoints.push(x, y);
         });
 
-        // Basic processing loop (will be expanded with OpenCV detection)
+        function getAngle(x, y, cx, cy) {
+            let angle = Math.atan2(y - cy, x - cx) * (180 / Math.PI);
+            return (angle + 360) % 360;
+        }
+
         function processFrame() {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            // TODO: Add OpenCV ball detection here
+
+            if (cvReady && perspectiveMatrix) {
+                // Future: Use OpenCV for better detection
+            }
+
+            // Basic bright ball detection
+            const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = frame.data;
+            let sumX = 0, sumY = 0, count = 0;
+
+            for (let y = 100; y < canvas.height - 100; y += 4) {
+                for (let x = 100; x < canvas.width - 100; x += 4) {
+                    const i = (y * canvas.width + x) * 4;
+                    if (data[i] > 210 && data[i+1] > 210 && data[i+2] > 200) {
+                        sumX += x;
+                        sumY += y;
+                        count++;
+                    }
+                }
+            }
+
+            if (count > 8) {
+                const cx = sumX / count;
+                const cy = sumY / count;
+                const newAngle = getAngle(cx, cy, canvas.width/2, canvas.height/2);
+
+                if (prevPos) {
+                    const dt = (Date.now() - prevTime) / 1000;
+                    ballSpeed = Math.hypot(cx - prevPos.x, cy - prevPos.y) / dt;
+                }
+
+                currentAngle = newAngle;
+
+                // Draw
+                ctx.strokeStyle = '#f00';
+                ctx.lineWidth = 6;
+                ctx.beginPath();
+                ctx.arc(cx, cy, 20, 0, Math.PI*2);
+                ctx.stroke();
+
+                prevPos = {x: cx, y: cy};
+                prevTime = Date.now();
+
+                document.getElementById('ballInfo').innerHTML = `SPEED: ${Math.round(ballSpeed)} px/s | ANGLE: ${currentAngle.toFixed(0)}°`;
+                document.getElementById('prediction').innerHTML = `SECTOR: <b>${europeanWheel[Math.floor(currentAngle / (360/37)) % 37]}</b>`;
+            }
+
             requestAnimationFrame(processFrame);
         }
 
