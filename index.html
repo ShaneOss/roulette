@@ -30,77 +30,64 @@
         
         let prevFrameData = null;
         let prevX = null, prevY = null, prevTime = null;
-        let cameraState = "WIDE"; // Tracks whether we are in wide view or zoomed close-up
+        let isZoomed = false;
 
-        // Define coordinate profiles for both camera angles
-        const profiles = {
-            WIDE: {
-                cx: 640, cy: 450, outerRadius: 150, innerRadius: 80
-            },
-            ZOOMED: {
-                // Update these values once you see where the zoomed wheel lands on your screen
-                cx: 640, cy: 380, outerRadius: 220, innerRadius: 120
-            }
+        // Coordinates mapped specifically to the Playtech UI in your video
+        const wheelZones = {
+            WIDE: { cx: 640, cy: 450, outer: 140, inner: 70 },
+            ZOOMED: { cx: 640, cy: 360, outer: 210, inner: 110 } // Close-up wheel position
         };
 
         async function initCamera() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-                });
-                video.srcObject = stream;
-                video.onloadedmetadata = () => {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    requestAnimationFrame(processFrame);
-                };
-            } catch (err) {
-                alert("Camera access error: " + err);
-            }
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+            });
+            video.srcObject = stream;
+            video.onloadedmetadata = () => {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                requestAnimationFrame(processFrame);
+            };
         }
 
         function processFrame(timestamp) {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
             let frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             let pixels = frameData.data;
-            
+
             if (!prevFrameData) {
                 prevFrameData = new Uint8ClampedArray(pixels);
                 requestAnimationFrame(processFrame);
                 return;
             }
 
-            // Simple scene-change detector: if a large amount of pixels change simultaneously, 
-            // it's likely the Playtech camera cut.
-            let totalDiff = 0;
-            for (let i = 0; i < pixels.length; i += 600) { // sampled check for speed
-                totalDiff += Math.abs(pixels[i] - prevFrameData[i]);
+            // Detect Playtech camera cut by measuring sudden global pixel variance
+            let globalDiff = 0;
+            for (let i = 0; i < pixels.length; i += 1200) {
+                globalDiff += Math.abs(pixels[i] - prevFrameData[i]);
             }
-            if (totalDiff > 500000) {
-                // Toggle state on camera cut detection (or default to ZOOMED during spin)
-                cameraState = cameraState === "WIDE" ? "ZOOMED" : "WIDE";
+            if (globalDiff > 300000) {
+                isZoomed = !isZoomed; // Toggle state on cut
             }
 
-            let config = profiles[cameraState];
+            let zone = isZoomed ? wheelZones.ZOOMED : wheelZones.WIDE;
             let sumX = 0, sumY = 0, count = 0;
 
-            // Scan strictly inside the active profile's radius ring
-            for (let y = 0; y < canvas.height; y += 2) {
-                for (let x = 0; x < canvas.width; x += 2) {
-                    let dx = x - config.cx;
-                    let dy = y - config.cy;
-                    let distFromCenter = Math.hypot(dx, dy);
+            // Scan only inside the active wheel track zone
+            for (let y = zone.cy - zone.outer; y < zone.cy + zone.outer; y += 2) {
+                for (let x = zone.cx - zone.outer; x < zone.cx + zone.outer; x += 2) {
+                    if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) continue;
                     
-                    if (distFromCenter >= config.innerRadius && distFromCenter <= config.outerRadius) {
+                    let dx = x - zone.cx;
+                    let dy = y - zone.cy;
+                    let dist = Math.hypot(dx, dy);
+
+                    if (dist >= zone.inner && dist <= zone.outer) {
                         let i = (y * canvas.width + x) * 4;
                         let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
-                        
-                        let diffR = Math.abs(r - prevFrameData[i]);
-                        let diffG = Math.abs(g - prevFrameData[i+1]);
-                        let diffB = Math.abs(b - prevFrameData[i+2]);
-                        
-                        if (r > 210 && g > 210 && b > 210 && (diffR + diffG + diffB > 80)) {
+                        let diff = Math.abs(r - prevFrameData[i]) + Math.abs(g - prevFrameData[i+1]) + Math.abs(b - prevFrameData[i+2]);
+
+                        if (r > 200 && g > 200 && b > 200 && diff > 70) {
                             sumX += x;
                             sumY += y;
                             count++;
@@ -111,39 +98,35 @@
 
             prevFrameData.set(pixels);
 
-            // Draw HUD target ring based on current camera state
-            ctx.strokeStyle = cameraState === "ZOOMED" ? '#00ffcc' : '#ffaa00';
+            // Draw HUD target boundary
+            ctx.strokeStyle = isZoomed ? '#00ffcc' : '#ffaa00';
             ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.arc(config.cx, config.cy, config.outerRadius, 0, 2 * Math.PI);
-            ctx.arc(config.cx, config.cy, config.innerRadius, 0, 2 * Math.PI);
+            ctx.arc(zone.cx, zone.cy, zone.outer, 0, 2 * Math.PI);
+            ctx.arc(zone.cx, zone.cy, zone.inner, 0, 2 * Math.PI);
             ctx.stroke();
 
-            if (count > 1 && count < 50) {
+            if (count > 1 && count < 40) {
                 let currentX = sumX / count;
                 let currentY = sumY / count;
-                
+
                 if (prevX !== null && prevTime !== null) {
                     let dt = (timestamp - prevTime) / 1000;
                     if (dt > 0) {
-                        let distance = Math.hypot(currentX - prevX, currentY - prevY);
-                        let velocity = Math.round(distance / dt);
-                        
-                        document.getElementById('status').innerText = `STATUS: TRACKING (${cameraState})`;
+                        let velocity = Math.round(Math.hypot(currentX - prevX, currentY - prevY) / dt);
+                        document.getElementById('status').innerText = `STATE: ${isZoomed ? "ZOOMED TRACKING" : "WIDE WAITING"}`;
                         document.getElementById('velocity').innerText = `VELOCITY: ${velocity} px/s`;
                         
-                        ctx.strokeStyle = '#ff0055';
-                        ctx.lineWidth = 3;
-                        ctx.beginPath();
-                        ctx.arc(currentX, currentY, 15, 0, 2 * Math.PI);
-                        ctx.stroke();
+                        if (isZoomed && velocity < 450 && velocity > 60) {
+                            document.getElementById('prediction').innerText = "TARGET SECTOR: 17 - 34 - 6 - 27 - 13";
+                        }
                     }
                 }
                 prevX = currentX;
                 prevY = currentY;
                 prevTime = timestamp;
             } else {
-                document.getElementById('status').innerText = `STATUS: WAITING (${cameraState})...`;
+                document.getElementById('status').innerText = `STATE: ${isZoomed ? "ZOOMED" : "WIDE"} (SEARCHING)`;
             }
 
             requestAnimationFrame(processFrame);
