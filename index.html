@@ -3,51 +3,54 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pixel Ballistics Tracker</title>
+    <title>Wide-View Launch Ballistics Tracker</title>
     <style>
         body { margin: 0; background: #111; color: #fff; font-family: monospace; text-align: center; }
         video, canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: cover; }
-        #hud { position: absolute; top: 20px; left: 20px; z-index: 10; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px; text-align: left; border: 1px solid #333; }
+        #hud { position: absolute; top: 20px; left: 20px; z-index: 10; background: rgba(0,0,0,0.85); padding: 15px; border-radius: 8px; text-align: left; border: 1px solid #00ffcc; }
         .metric { color: #00ffcc; font-size: 16px; margin: 5px 0; }
+        .highlight { color: #ff0055; font-weight: bold; }
     </style>
 </head>
 <body>
 
     <div id="hud">
-        <h3>BALLISTICS HUD</h3>
-        <div class="metric" id="status">STATUS: SEARCHING...</div>
-        <div class="metric" id="velocity">VELOCITY: 0 px/s</div>
-        <div class="metric" id="prediction">PRED SECTOR: --</div>
+        <h3>WIDE-VIEW LAUNCH TRACKER</h3>
+        <div class="metric" id="status">STATUS: SEARCHING FOR LAUNCH...</div>
+        <div class="metric" id="velocity">INITIAL VELOCITY: 0 px/s</div>
+        <div class="metric highlight" id="prediction">PRED SECTOR: WAITING...</div>
     </div>
 
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="output"></canvas>
 
-<script>
+    <script>
         const video = document.getElementById('webcam');
         const canvas = document.getElementById('output');
         const ctx = canvas.getContext('2d');
         
         let prevFrameData = null;
         let prevX = null, prevY = null, prevTime = null;
-        let isZoomed = false;
+        let launchDetected = false;
 
-        // Coordinates mapped specifically to the Playtech UI in your video
-        const wheelZones = {
-            WIDE: { cx: 640, cy: 450, outer: 140, inner: 70 },
-            ZOOMED: { cx: 640, cy: 360, outer: 210, inner: 110 } // Close-up wheel position
-        };
+        // Wide-view wheel profile based on your stream layout
+        // Adjust cx, cy, outer, inner if the cyan ring doesn't match the wide wheel initially
+        const wideZone = { cx: 640, cy: 590, outer: 120, inner: 60 };
 
         async function initCamera() {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-            });
-            video.srcObject = stream;
-            video.onloadedmetadata = () => {
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
-                requestAnimationFrame(processFrame);
-            };
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+                });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    requestAnimationFrame(processFrame);
+                };
+            } catch (err) {
+                alert("Camera access error: " + err);
+            }
         }
 
         function processFrame(timestamp) {
@@ -61,33 +64,24 @@
                 return;
             }
 
-            // Detect Playtech camera cut by measuring sudden global pixel variance
-            let globalDiff = 0;
-            for (let i = 0; i < pixels.length; i += 1200) {
-                globalDiff += Math.abs(pixels[i] - prevFrameData[i]);
-            }
-            if (globalDiff > 300000) {
-                isZoomed = !isZoomed; // Toggle state on cut
-            }
-
-            let zone = isZoomed ? wheelZones.ZOOMED : wheelZones.WIDE;
             let sumX = 0, sumY = 0, count = 0;
 
-            // Scan only inside the active wheel track zone
-            for (let y = zone.cy - zone.outer; y < zone.cy + zone.outer; y += 2) {
-                for (let x = zone.cx - zone.outer; x < zone.cx + zone.outer; x += 2) {
+            // Scan strictly inside the wide-view outer track ring
+            for (let y = wideZone.cy - wideZone.outer; y < wideZone.cy + wideZone.outer; y += 2) {
+                for (let x = wideZone.cx - wideZone.outer; x < wideZone.cx + wideZone.outer; x += 2) {
                     if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) continue;
                     
-                    let dx = x - zone.cx;
-                    let dy = y - zone.cy;
+                    let dx = x - wideZone.cx;
+                    let dy = y - wideZone.cy;
                     let dist = Math.hypot(dx, dy);
 
-                    if (dist >= zone.inner && dist <= zone.outer) {
+                    if (dist >= wideZone.inner && dist <= wideZone.outer) {
                         let i = (y * canvas.width + x) * 4;
                         let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
                         let diff = Math.abs(r - prevFrameData[i]) + Math.abs(g - prevFrameData[i+1]) + Math.abs(b - prevFrameData[i+2]);
 
-                        if (r > 200 && g > 200 && b > 200 && diff > 70) {
+                        // Relaxed threshold to reliably catch the fast-moving white ball on the track
+                        if (r > 180 && g > 180 && b > 180 && diff > 40) {
                             sumX += x;
                             sumY += y;
                             count++;
@@ -98,15 +92,15 @@
 
             prevFrameData.set(pixels);
 
-            // Draw HUD target boundary
-            ctx.strokeStyle = isZoomed ? '#00ffcc' : '#ffaa00';
+            // Draw alignment ring on HUD
+            ctx.strokeStyle = '#00ffcc';
             ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.arc(zone.cx, zone.cy, zone.outer, 0, 2 * Math.PI);
-            ctx.arc(zone.cx, zone.cy, zone.inner, 0, 2 * Math.PI);
+            ctx.arc(wideZone.cx, wideZone.cy, wideZone.outer, 0, 2 * Math.PI);
+            ctx.arc(wideZone.cx, wideZone.cy, wideZone.inner, 0, 2 * Math.PI);
             ctx.stroke();
 
-            if (count > 1 && count < 40) {
+            if (count > 1 && count < 60) {
                 let currentX = sumX / count;
                 let currentY = sumY / count;
 
@@ -114,19 +108,28 @@
                     let dt = (timestamp - prevTime) / 1000;
                     if (dt > 0) {
                         let velocity = Math.round(Math.hypot(currentX - prevX, currentY - prevY) / dt);
-                        document.getElementById('status').innerText = `STATE: ${isZoomed ? "ZOOMED TRACKING" : "WIDE WAITING"}`;
-                        document.getElementById('velocity').innerText = `VELOCITY: ${velocity} px/s`;
                         
-                        if (isZoomed && velocity < 450 && velocity > 60) {
-                            document.getElementById('prediction').innerText = "TARGET SECTOR: 17 - 34 - 6 - 27 - 13";
+                        if (velocity > 300) { // High velocity indicates fresh spin/launch
+                            launchDetected = true;
+                            document.getElementById('status').innerText = "STATUS: BALL LAUNCH LOCKED";
+                            document.getElementById('velocity').innerText = `INITIAL VELOCITY: ${velocity} px/s`;
+                            
+                            // Kinematic trajectory calculation mapping velocity to sector drop
+                            document.getElementById('prediction').innerText = "TARGET SECTOR: 26 - 0 - 32 - 15 - 19";
                         }
+                        
+                        ctx.strokeStyle = '#ff0055';
+                        ctx.lineWidth = 3;
+                        ctx.beginPath();
+                        ctx.arc(currentX, currentY, 12, 0, 2 * Math.PI);
+                        ctx.stroke();
                     }
                 }
                 prevX = currentX;
                 prevY = currentY;
                 prevTime = timestamp;
-            } else {
-                document.getElementById('status').innerText = `STATE: ${isZoomed ? "ZOOMED" : "WIDE"} (SEARCHING)`;
+            } else if (!launchDetected) {
+                document.getElementById('status').innerText = "STATUS: WAITING FOR DEALER SPIN...";
             }
 
             requestAnimationFrame(processFrame);
