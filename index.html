@@ -1,30 +1,70 @@
+Here is the complete, self-contained `index.html` file containing the camera initialization, tap-to-center calibration, annular track filtering, motion detection, velocity calculation, and the automatic round reset feature.
+
+Save this code as `index.html`, open it in Chrome on your Pixel 7 Pro, tap the center of the roulette wheel on your phone screen to align the tracking rings, and point it at your monitor.
+
+```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wide-View Launch Ballistics Tracker</title>
+    <title>Pixel 7 Pro Ballistics Tracker</title>
     <style>
-        body { margin: 0; background: #111; color: #fff; font-family: monospace; text-align: center; }
-        video, canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: cover; }
-        #hud { position: absolute; top: 20px; left: 20px; z-index: 10; background: rgba(0,0,0,0.85); padding: 15px; border-radius: 8px; text-align: left; border: 1px solid #00ffcc; }
-        .metric { color: #00ffcc; font-size: 16px; margin: 5px 0; }
-        .highlight { color: #ff0055; font-weight: bold; }
+        body { 
+            margin: 0; 
+            background: #111; 
+            color: #fff; 
+            font-family: monospace; 
+            text-align: center; 
+            overflow: hidden; 
+        }
+        video { 
+            display: none; 
+        }
+        canvas { 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            width: 100vw; 
+            height: 100vh; 
+            object-fit: cover; 
+        }
+        #hud { 
+            position: absolute; 
+            top: 20px; 
+            left: 20px; 
+            z-index: 10; 
+            background: rgba(0, 0, 0, 0.85); 
+            padding: 15px; 
+            border-radius: 8px; 
+            text-align: left; 
+            border: 1px solid #00ffcc; 
+            pointer-events: none;
+        }
+        .metric { 
+            color: #00ffcc; 
+            font-size: 16px; 
+            margin: 5px 0; 
+        }
+        .highlight { 
+            color: #ff0055; 
+            font-weight: bold; 
+        }
     </style>
 </head>
 <body>
 
     <div id="hud">
-        <h3>WIDE-VIEW LAUNCH TRACKER</h3>
-        <div class="metric" id="status">STATUS: SEARCHING FOR LAUNCH...</div>
+        <h3>BALLISTICS TRACKER HUD</h3>
+        <div class="metric" id="status">STATUS: TAP WHEEL TO CENTER</div>
         <div class="metric" id="velocity">INITIAL VELOCITY: 0 px/s</div>
-        <div class="metric highlight" id="prediction">PRED SECTOR: WAITING...</div>
+        <div class="metric highlight" id="prediction">TARGET SECTOR: WAITING...</div>
     </div>
 
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="output"></canvas>
 
-<script>
+    <script>
         const video = document.getElementById('webcam');
         const canvas = document.getElementById('output');
         const ctx = canvas.getContext('2d');
@@ -33,29 +73,37 @@
         let prevX = null, prevY = null, prevTime = null;
         let launchDetected = false;
 
-        // Default wide-view zone (will update when you tap the screen)
-        let wideZone = { cx: 640, cy: 590, outer: 120, inner: 60 };
+        // Default tracking zone (will update instantly wherever you tap the screen)
+        let wideZone = { cx: 640, cy: 360, outer: 120, inner: 60 };
 
         async function initCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+                    video: { 
+                        facingMode: 'environment', 
+                        width: { ideal: 1280 }, 
+                        height: { ideal: 720 } 
+                    }
                 });
                 video.srcObject = stream;
                 video.onloadedmetadata = () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
+                    // Default center to middle of frame initially
+                    wideZone.cx = canvas.width / 2;
+                    wideZone.cy = canvas.height / 2;
                     requestAnimationFrame(processFrame);
                 };
             } catch (err) {
-                alert("Camera access error: " + err);
+                alert("Camera access error or denied: " + err);
             }
         }
 
-        // Tap the screen anywhere to center the tracking rings on the roulette wheel
+        // Tap-to-center calibration: Tap anywhere on your phone screen to snap the rings to the wheel
         window.addEventListener('click', (e) => {
-            wideZone.cx = e.clientX;
-            wideZone.cy = e.clientY;
+            wideZone.cx = e.clientX * (canvas.width / window.innerWidth);
+            wideZone.cy = e.clientY * (canvas.height / window.innerHeight);
+            launchDetected = false;
         });
 
         function processFrame(timestamp) {
@@ -71,8 +119,9 @@
 
             let sumX = 0, sumY = 0, count = 0;
 
-            for (let y = wideZone.cy - wideZone.outer; y < wideZone.cy + wideZone.outer; y += 2) {
-                for (let x = wideZone.cx - wideZone.outer; x < wideZone.cx + wideZone.outer; x += 2) {
+            // Scan strictly inside the annular track ring defined by inner and outer radius
+            for (let y = Math.floor(wideZone.cy - wideZone.outer); y < wideZone.cy + wideZone.outer; y += 2) {
+                for (let x = Math.floor(wideZone.cx - wideZone.outer); x < wideZone.cx + wideZone.outer; x += 2) {
                     if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) continue;
                     
                     let dx = x - wideZone.cx;
@@ -84,6 +133,7 @@
                         let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
                         let diff = Math.abs(r - prevFrameData[i]) + Math.abs(g - prevFrameData[i+1]) + Math.abs(b - prevFrameData[i+2]);
 
+                        // Filter for bright white pixels experiencing motion changes
                         if (r > 180 && g > 180 && b > 180 && diff > 40) {
                             sumX += x;
                             sumY += y;
@@ -95,7 +145,7 @@
 
             prevFrameData.set(pixels);
 
-            // Draw alignment ring (Cyan)
+            // Draw alignment target ring (Cyan)
             ctx.strokeStyle = '#00ffcc';
             ctx.lineWidth = 2;
             ctx.beginPath();
@@ -119,7 +169,7 @@
                             document.getElementById('prediction').innerText = "TARGET SECTOR: 26 - 0 - 32 - 15 - 19";
                         }
                         
-                        // Tracking reticle (Pink)
+                        // Active ball tracking reticle (Pink)
                         ctx.strokeStyle = '#ff0055';
                         ctx.lineWidth = 3;
                         ctx.beginPath();
@@ -130,8 +180,15 @@
                 prevX = currentX;
                 prevY = currentY;
                 prevTime = timestamp;
-            } else if (!launchDetected) {
-                document.getElementById('status').innerText = "STATUS: TAP WHEEL TO CENTER RINGS";
+            } else {
+                // Auto-reset when the ball stops moving or round clears
+                if (count === 0) {
+                    launchDetected = false;
+                    prevX = null;
+                    prevY = null;
+                    document.getElementById('status').innerText = "STATUS: READY FOR NEXT SPIN...";
+                    document.getElementById('prediction').innerText = "TARGET SECTOR: WAITING...";
+                }
             }
 
             requestAnimationFrame(processFrame);
@@ -141,3 +198,5 @@
     </script>
 </body>
 </html>
+
+```
