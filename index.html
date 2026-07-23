@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pixel 7 Pro Ballistics Tracker - Elliptical View</title>
+    <title>Pixel 7 Pro Ballistics Tracker - Ultra-Flat View</title>
     <style>
         body { 
             margin: 0; 
@@ -59,7 +59,7 @@
 <body>
 
     <div id="hud">
-        <h3>ELLIPTICAL BALLISTICS TRACKER</h3>
+        <h3>FLAT-PERSPECTIVE TRACKER</h3>
         <div class="metric">
             LAST NUMBER: 
             <select id="lastNumSelect"></select>
@@ -98,12 +98,11 @@
         let launchDetected = false;
         let missingFrames = 0;
 
-        // Elliptical zone parameters to match camera perspective tilt
-        // rx = horizontal radius, ry = vertical radius (squashed for perspective)
+        // Ultra-flat elliptical zone parameters for extreme overhead perspective
         let trackZone = { 
             cx: 640, cy: 360, 
-            rxOuter: 220, ryOuter: 140, 
-            rxInner: 150, ryInner: 95 
+            rxOuter: 250, ryOuter: 80,  // Flatter vertical height
+            rxInner: 180, ryInner: 50   // Flatter inner boundary
         };
 
         async function initCamera() {
@@ -128,7 +127,7 @@
             }
         }
 
-        // Tap anywhere on the screen to center the elliptical tracking zone
+        // Tap anywhere on the screen to center the flattened elliptical tracking zone
         window.addEventListener('click', (e) => {
             if (e.target.tagName === 'SELECT') return;
 
@@ -151,7 +150,7 @@
 
             let sumX = 0, sumY = 0, count = 0;
 
-            // Scan inside the perspective-correct elliptical track ring
+            // Scan inside the ultra-flat elliptical track ring
             let scanXMin = Math.floor(trackZone.cx - trackZone.rxOuter);
             let scanXMax = Math.ceil(trackZone.cx + trackZone.rxOuter);
             let scanYMin = Math.floor(trackZone.cy - trackZone.ryOuter);
@@ -164,17 +163,14 @@
                     let dx = x - trackZone.cx;
                     let dy = y - trackZone.cy;
 
-                    // Ellipse boundary equations
                     let outerCheck = (dx * dx) / (trackZone.rxOuter * trackZone.rxOuter) + (dy * dy) / (trackZone.ryOuter * trackZone.ryOuter);
                     let innerCheck = (dx * dx) / (trackZone.rxInner * trackZone.rxInner) + (dy * dy) / (trackZone.ryInner * trackZone.ryInner);
 
-                    // Must be inside outer ellipse AND outside inner ellipse
                     if (outerCheck <= 1.0 && innerCheck >= 1.0) {
                         let i = (y * canvas.width + x) * 4;
                         let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
                         let diff = Math.abs(r - prevFrameData[i]) + Math.abs(g - prevFrameData[i+1]) + Math.abs(b - prevFrameData[i+2]);
 
-                        // Strict brightness + movement check for the ball, ignoring shirts/lighting
                         if (r > 200 && g > 200 && b > 200 && diff > 60) {
                             sumX += x;
                             sumY += y;
@@ -186,7 +182,7 @@
 
             prevFrameData.set(pixels);
 
-            // Draw Perspective-Correct Cyan Ellipse Guides on HUD
+            // Draw Flat Cyan Ellipse Guides on HUD
             ctx.strokeStyle = '#00ffcc';
             ctx.lineWidth = 2;
             
@@ -195,7 +191,6 @@
             ctx.ellipse(trackZone.cx, trackZone.cy, trackZone.rxInner, trackZone.ryInner, 0, 0, 2 * Math.PI);
             ctx.stroke();
 
-            // Sphere size validation filter (3 to 25 pixels)
             if (count >= 3 && count <= 25) {
                 missingFrames = 0; 
                 let currentX = sumX / count;
@@ -226,7 +221,6 @@
                             document.getElementById('prediction').innerText = `TARGET SECTOR: ${p1} - ${p2} - [ ${target} ] - ${p3} - ${p4}`;
                         }
                         
-                        // Active ball tracking reticle (Pink)
                         ctx.strokeStyle = '#ff0055';
                         ctx.lineWidth = 3;
                         ctx.beginPath();
