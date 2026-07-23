@@ -30,6 +30,18 @@
         
         let prevFrameData = null;
         let prevX = null, prevY = null, prevTime = null;
+        let cameraState = "WIDE"; // Tracks whether we are in wide view or zoomed close-up
+
+        // Define coordinate profiles for both camera angles
+        const profiles = {
+            WIDE: {
+                cx: 640, cy: 450, outerRadius: 150, innerRadius: 80
+            },
+            ZOOMED: {
+                // Update these values once you see where the zoomed wheel lands on your screen
+                cx: 640, cy: 380, outerRadius: 220, innerRadius: 120
+            }
+        };
 
         async function initCamera() {
             try {
@@ -43,7 +55,7 @@
                     requestAnimationFrame(processFrame);
                 };
             } catch (err) {
-                alert("Camera access denied or unavailable: " + err);
+                alert("Camera access error: " + err);
             }
         }
 
@@ -59,29 +71,55 @@
                 return;
             }
 
+            // Simple scene-change detector: if a large amount of pixels change simultaneously, 
+            // it's likely the Playtech camera cut.
+            let totalDiff = 0;
+            for (let i = 0; i < pixels.length; i += 600) { // sampled check for speed
+                totalDiff += Math.abs(pixels[i] - prevFrameData[i]);
+            }
+            if (totalDiff > 500000) {
+                // Toggle state on camera cut detection (or default to ZOOMED during spin)
+                cameraState = cameraState === "WIDE" ? "ZOOMED" : "WIDE";
+            }
+
+            let config = profiles[cameraState];
             let sumX = 0, sumY = 0, count = 0;
 
-            // Scan every 4th pixel for performance
-            for (let i = 0; i < pixels.length; i += 16) {
-                let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
-                
-                // Must be bright white AND have changed position since the last frame (motion detection)
-                let diffR = Math.abs(r - prevFrameData[i]);
-                let diffG = Math.abs(g - prevFrameData[i+1]);
-                let diffB = Math.abs(b - prevFrameData[i+2]);
-                
-                if (r > 200 && g > 200 && b > 200 && (diffR + diffG + diffB > 100)) {
-                    let idx = i / 4;
-                    sumX += idx % canvas.width;
-                    sumY += Math.floor(idx / canvas.width);
-                    count++;
+            // Scan strictly inside the active profile's radius ring
+            for (let y = 0; y < canvas.height; y += 2) {
+                for (let x = 0; x < canvas.width; x += 2) {
+                    let dx = x - config.cx;
+                    let dy = y - config.cy;
+                    let distFromCenter = Math.hypot(dx, dy);
+                    
+                    if (distFromCenter >= config.innerRadius && distFromCenter <= config.outerRadius) {
+                        let i = (y * canvas.width + x) * 4;
+                        let r = pixels[i], g = pixels[i+1], b = pixels[i+2];
+                        
+                        let diffR = Math.abs(r - prevFrameData[i]);
+                        let diffG = Math.abs(g - prevFrameData[i+1]);
+                        let diffB = Math.abs(b - prevFrameData[i+2]);
+                        
+                        if (r > 210 && g > 210 && b > 210 && (diffR + diffG + diffB > 80)) {
+                            sumX += x;
+                            sumY += y;
+                            count++;
+                        }
+                    }
                 }
             }
 
-            // Save current frame as previous for the next loop tick
             prevFrameData.set(pixels);
 
-            if (count > 2 && count < 100) { // Filter out large moving blocks, keep small ball size
+            // Draw HUD target ring based on current camera state
+            ctx.strokeStyle = cameraState === "ZOOMED" ? '#00ffcc' : '#ffaa00';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(config.cx, config.cy, config.outerRadius, 0, 2 * Math.PI);
+            ctx.arc(config.cx, config.cy, config.innerRadius, 0, 2 * Math.PI);
+            ctx.stroke();
+
+            if (count > 1 && count < 50) {
                 let currentX = sumX / count;
                 let currentY = sumY / count;
                 
@@ -91,20 +129,13 @@
                         let distance = Math.hypot(currentX - prevX, currentY - prevY);
                         let velocity = Math.round(distance / dt);
                         
-                        document.getElementById('status').innerText = "STATUS: BALL LOCKED";
+                        document.getElementById('status').innerText = `STATUS: TRACKING (${cameraState})`;
                         document.getElementById('velocity').innerText = `VELOCITY: ${velocity} px/s`;
                         
-                        if (velocity < 400 && velocity > 50) {
-                            document.getElementById('prediction').innerText = "PRED SECTOR: 17, 34, 6, 27, 13";
-                        } else {
-                            document.getElementById('prediction').innerText = "PRED SECTOR: CALCULATING DECAY...";
-                        }
-                        
-                        // Draw tracking reticle over the moving ball
-                        ctx.strokeStyle = '#00ffcc';
+                        ctx.strokeStyle = '#ff0055';
                         ctx.lineWidth = 3;
                         ctx.beginPath();
-                        ctx.arc(currentX, currentY, 25, 0, 2 * Math.PI);
+                        ctx.arc(currentX, currentY, 15, 0, 2 * Math.PI);
                         ctx.stroke();
                     }
                 }
@@ -112,7 +143,7 @@
                 prevY = currentY;
                 prevTime = timestamp;
             } else {
-                document.getElementById('status').innerText = "STATUS: WAITING FOR BALL MOTION...";
+                document.getElementById('status').innerText = `STATUS: WAITING (${cameraState})...`;
             }
 
             requestAnimationFrame(processFrame);
