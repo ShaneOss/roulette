@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Roulette Vision Pro - Complete</title>
+    <title>Roulette Vision Pro - Wheel Detection</title>
     <script src="https://docs.opencv.org/4.8.0/opencv.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
@@ -15,8 +15,8 @@
 </head>
 <body>
     <div id="hud">
-        <h3>ROULETTE VISION PRO - COMPLETE</h3>
-        <div id="status">STATUS: Starting camera...</div>
+        <h3>ROULETTE VISION PRO</h3>
+        <div id="status">STATUS: Starting...</div>
         <div id="fps">FPS: --</div>
         <div id="velocity">VELOCITY: -- px/s</div>
         <div id="angularVel">ANGULAR: -- °/s</div>
@@ -66,7 +66,7 @@
                     canvas.height = video.videoHeight;
                     centerX = canvas.width / 2;
                     centerY = canvas.height / 2;
-                    document.getElementById('status').innerText = 'TRACKING ACTIVE (Auto Center)';
+                    document.getElementById('status').innerText = 'TRACKING ACTIVE';
                     requestAnimationFrame(processFrame);
                 };
             } catch (e) {
@@ -74,24 +74,27 @@
             }
         }
 
-        // Load OpenCV
         const script = document.createElement('script');
         script.src = 'https://docs.opencv.org/4.8.0/opencv.js';
         script.onload = () => { cv = window.cv; cvReady = true; };
         document.head.appendChild(script);
 
-        function processFrame(timestamp) {
+        function processFrame() {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
             let sumX = 0, sumY = 0, count = 0;
+            let greenSum = 0; // for zero detection
 
             for (let y = 100; y < canvas.height - 100; y += 4) {
                 for (let x = 100; x < canvas.width - 100; x += 4) {
                     const i = (y * canvas.width + x) * 4;
-                    if (data[i] > 210 && data[i+1] > 210 && data[i+2] > 200) {
+                    const r = data[i], g = data[i+1], b = data[i+2];
+
+                    if (r > 210 && g > 210 && b > 200) {
                         sumX += x; sumY += y; count++;
                     }
+                    if (g > 180 && r < 100 && b < 100) greenSum++; // green zero area
                 }
             }
 
@@ -116,6 +119,13 @@
 
                 prevPos = {x: cx, y: cy};
                 prevTime = Date.now();
+
+                const sectorIndex = Math.floor((360 - angle) % 360 / (360 / 37));
+                const predicted = europeanWheel[sectorIndex];
+
+                document.getElementById('velocity').innerText = `VELOCITY: ${Math.round(ballSpeed)} px/s`;
+                document.getElementById('angularVel').innerText = `ANGULAR: ${angularVel.toFixed(1)} °/s`;
+                document.getElementById('prediction').innerText = `PREDICTION: ${predicted} ${greenSum > 50 ? '(Near Zero)' : ''}`;
             }
 
             frameCount++;
@@ -124,11 +134,7 @@
                 frameCount = 0;
                 fpsStart = Date.now();
             }
-
             document.getElementById('fps').innerText = `FPS: ${fps}`;
-            document.getElementById('velocity').innerText = `VELOCITY: ${Math.round(ballSpeed)} px/s`;
-            document.getElementById('angularVel').innerText = `ANGULAR: ${angularVel.toFixed(1)} °/s`;
-            document.getElementById('prediction').innerText = `PREDICTION: ${europeanWheel[Math.floor(currentAngle / (360/37)) % 37]}`;
 
             requestAnimationFrame(processFrame);
         }
