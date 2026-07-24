@@ -585,10 +585,19 @@
   }
 
   function ensureSize() {
+    if (el.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return false;
     const w = el.video.videoWidth | 0;
     const h = el.video.videoHeight | 0;
     if (!w || !h) return false;
-    if (el.canvas.width !== w || el.canvas.height !== h) {
+
+    // OpenCV.js VideoCapture.read() validates the destination Mat against the
+    // video element's width/height properties (not only videoWidth/videoHeight).
+    // Keep all three buffers in lockstep with the decoded camera frame.
+    if (el.video.width !== w) el.video.width = w;
+    if (el.video.height !== h) el.video.height = h;
+
+    if (!mats || frameW !== w || frameH !== h ||
+        el.canvas.width !== w || el.canvas.height !== h) {
       el.canvas.width = w;
       el.canvas.height = h;
       allocMats(w, h);
@@ -608,6 +617,27 @@
   }
 
   // ─── Camera ────────────────────────────────────────────────────────────────
+  function waitForDecodedVideoFrame(video) {
+    return new Promise((resolve, reject) => {
+      const deadline = performance.now() + 10000;
+
+      const check = () => {
+        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            video.videoWidth > 0 && video.videoHeight > 0) {
+          resolve();
+          return;
+        }
+        if (performance.now() >= deadline) {
+          reject(new Error('Camera started but no decoded video frame arrived'));
+          return;
+        }
+        requestAnimationFrame(check);
+      };
+
+      check();
+    });
+  }
+
   async function startCamera() {
     try {
       setStatus('STATUS: Requesting camera…');
@@ -621,12 +651,13 @@
         },
       });
       el.video.srcObject = stream;
-      await el.video.play();
       await new Promise((res) => {
-        if (el.video.readyState >= 2) res();
-        else el.video.onloadedmetadata = () => res();
+        if (el.video.readyState >= HTMLMediaElement.HAVE_METADATA) res();
+        else el.video.addEventListener('loadedmetadata', res, { once: true });
       });
-      ensureSize();
+      await el.video.play();
+      await waitForDecodedVideoFrame(el.video);
+      if (!ensureSize()) throw new Error('Invalid camera frame dimensions');
       capturer = new cv.VideoCapture(el.video);
       running = true;
       lastFrameTs = performance.now();
@@ -1166,6 +1197,11 @@
 
     if (!cvReady || !capturer) return;
     if (!ensureSize()) return;
+    if (!mats || mats.src.cols !== el.video.width ||
+        mats.src.rows !== el.video.height) {
+      setStatus('STATUS: Synchronizing camera frame size…');
+      return;
+    }
 
     const tSec = ts / 1000;
     let dt = (ts - lastFrameTs) / 1000;
