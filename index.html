@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Roulette Vision Pro - Stable</title>
+    <title>Roulette Vision Pro - Fixed Camera</title>
     <style>
         body { margin:0; background:#111; color:#0f0; font-family:monospace; overflow:hidden; }
         video { display:none; }
@@ -41,14 +41,19 @@
                 });
                 video.srcObject = stream;
 
+                // Force play
+                video.play().catch(e => console.log("Play error", e));
+
                 video.onloadedmetadata = () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     centerX = canvas.width / 2;
                     centerY = canvas.height / 2;
-                    document.getElementById('status').innerText = "STATUS: TRACKING...";
+                    document.getElementById('status').innerText = "STATUS: TRACKING ACTIVE";
                     requestAnimationFrame(processFrame);
                 };
+
+                video.onplaying = () => document.getElementById('status').innerText = "STATUS: Camera Live";
             } catch (err) {
                 document.getElementById('status').innerText = "CAMERA ERROR: " + err.message;
             }
@@ -73,9 +78,8 @@
 
             let sumX = 0, sumY = 0, count = 0;
 
-            // Scan for bright ball
-            for (let y = 60; y < canvas.height - 60; y += 3) {
-                for (let x = 60; x < canvas.width - 60; x += 3) {
+            for (let y = 80; y < canvas.height - 80; y += 3) {
+                for (let x = 80; x < canvas.width - 80; x += 3) {
                     const i = (y * canvas.width + x) * 4;
                     if (pixels[i] > 205 && pixels[i+1] > 205 && pixels[i+2] > 205) {
                         sumX += x;
@@ -85,7 +89,9 @@
                 }
             }
 
-            if (count > 5) {
+            prevFrameData.set(pixels);
+
+            if (count > 6) {
                 const currentX = sumX / count;
                 const currentY = sumY / count;
                 const angle = getAngle(currentX, currentY);
@@ -97,11 +103,10 @@
                     document.getElementById('velocity').innerText = `VELOCITY: ${velocity} px/s`;
                     document.getElementById('angleInfo').innerText = `ANGLE: ${angle.toFixed(0)}°`;
 
-                    const sector = europeanWheel[Math.floor((360 - angle) % 360 / (360 / 37))];
-                    document.getElementById('prediction').innerText = `PREDICTION: ${sector}`;
+                    const sectorIndex = Math.floor((360 - angle) % 360 / (360 / 37));
+                    document.getElementById('prediction').innerText = `PREDICTION: ${europeanWheel[sectorIndex]}`;
                 }
 
-                // Draw ball
                 ctx.strokeStyle = '#f00';
                 ctx.lineWidth = 5;
                 ctx.beginPath();
