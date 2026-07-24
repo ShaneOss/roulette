@@ -11,24 +11,16 @@
         video { display:none; }
         canvas { position:absolute; top:0; left:0; width:100vw; height:100vh; }
         #hud { position:absolute; top:10px; left:10px; background:rgba(0,0,0,0.9); padding:15px; border:2px solid #0f0; z-index:100; width:420px; }
-        #calib { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.95); padding:25px; border:3px solid #ff0; z-index:200; display:none; text-align:center; }
     </style>
 </head>
 <body>
     <div id="hud">
         <h3>ROULETTE VISION PRO - COMPLETE</h3>
-        <div id="status">Loading...</div>
+        <div id="status">STATUS: Starting camera...</div>
         <div id="fps">FPS: --</div>
         <div id="velocity">VELOCITY: -- px/s</div>
         <div id="angularVel">ANGULAR: -- °/s</div>
         <div id="prediction">PREDICTION: WAITING...</div>
-        <button onclick="startCalibration()">Calibrate Wheel</button>
-    </div>
-
-    <div id="calib">
-        <h3>4-Point Calibration</h3>
-        <p>Tap 4 corners of the wheel (TL → TR → BR → BL)</p>
-        <button onclick="finishCalibration()">Finish Calibration</button>
     </div>
 
     <video id="webcam" autoplay playsinline muted></video>
@@ -38,9 +30,7 @@
         let cvReady = false;
         let cv = null;
         let video, canvas, ctx;
-        let perspectiveMatrix = null;
-        let calibrationPoints = [];
-        let isCalibrating = false;
+        let centerX = 0, centerY = 0;
 
         const europeanWheel = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3];
 
@@ -49,10 +39,10 @@
         let currentAngle = 0;
         let ballSpeed = 0;
         let angularVel = 0;
+        let fps = 0, frameCount = 0, fpsStart = Date.now();
 
-        // Kalman Filter
         class KalmanFilter {
-            constructor(R=0.1, Q=3) { this.R = R; this.Q = Q; this.x = 0; this.P = 1; }
+            constructor() { this.x = 0; this.P = 1; this.R = 0.1; this.Q = 3; }
             update(z) {
                 const K = this.P / (this.P + this.R);
                 this.x += K * (z - this.x);
@@ -74,43 +64,25 @@
                     ctx = canvas.getContext('2d');
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
+                    centerX = canvas.width / 2;
+                    centerY = canvas.height / 2;
+                    document.getElementById('status').innerText = 'TRACKING ACTIVE (Auto Center)';
+                    requestAnimationFrame(processFrame);
                 };
             } catch (e) {
                 document.getElementById('status').innerText = 'Camera error';
             }
         }
 
-        function startCalibration() {
-            isCalibrating = true;
-            calibrationPoints = [];
-            document.getElementById('calib').style.display = 'block';
-        }
-
-        function finishCalibration() {
-            if (calibrationPoints.length === 4 && cv) {
-                const src = cv.matFromArray(4, 1, cv.CV_32FC2, calibrationPoints.flat());
-                const dst = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,canvas.width,0,canvas.width,canvas.height,0,canvas.height]);
-                perspectiveMatrix = cv.getPerspectiveTransform(src, dst);
-                src.delete(); dst.delete();
-            }
-            document.getElementById('calib').style.display = 'none';
-            isCalibrating = false;
-        }
-
         // Load OpenCV
         const script = document.createElement('script');
         script.src = 'https://docs.opencv.org/4.8.0/opencv.js';
-        script.onload = () => {
-            cv = window.cv;
-            cvReady = true;
-            document.getElementById('status').innerText = 'OpenCV Ready';
-        };
+        script.onload = () => { cv = window.cv; cvReady = true; };
         document.head.appendChild(script);
 
-        function processFrame() {
+        function processFrame(timestamp) {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // Simple bright ball detection (OpenCV contour can be added later)
             const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
             let sumX = 0, sumY = 0, count = 0;
 
@@ -126,7 +98,7 @@
             if (count > 8) {
                 const cx = sumX / count;
                 const cy = sumY / count;
-                const angle = ((Math.atan2(cy - canvas.height/2, cx - canvas.width/2) * 180 / Math.PI) + 360) % 360;
+                const angle = ((Math.atan2(cy - centerY, cx - centerX) * 180 / Math.PI) + 360) % 360;
 
                 if (prevPos) {
                     const dt = (Date.now() - prevTime) / 1000;
@@ -144,17 +116,24 @@
 
                 prevPos = {x: cx, y: cy};
                 prevTime = Date.now();
-
-                document.getElementById('velocity').innerText = `VELOCITY: ${Math.round(ballSpeed)} px/s`;
-                document.getElementById('angularVel').innerText = `ANGULAR: ${angularVel.toFixed(1)} °/s`;
-                document.getElementById('prediction').innerText = `PREDICTION: ${europeanWheel[Math.floor(currentAngle / (360/37)) % 37]}`;
             }
+
+            frameCount++;
+            if (Date.now() - fpsStart > 1000) {
+                fps = frameCount;
+                frameCount = 0;
+                fpsStart = Date.now();
+            }
+
+            document.getElementById('fps').innerText = `FPS: ${fps}`;
+            document.getElementById('velocity').innerText = `VELOCITY: ${Math.round(ballSpeed)} px/s`;
+            document.getElementById('angularVel').innerText = `ANGULAR: ${angularVel.toFixed(1)} °/s`;
+            document.getElementById('prediction').innerText = `PREDICTION: ${europeanWheel[Math.floor(currentAngle / (360/37)) % 37]}`;
 
             requestAnimationFrame(processFrame);
         }
 
         initCamera();
-        requestAnimationFrame(processFrame);
     </script>
 </body>
 </html>
