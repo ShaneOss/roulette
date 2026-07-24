@@ -168,12 +168,13 @@
     <div class="controls compact-hide">
       <button class="primary" id="btnStart" type="button">Start Camera</button>
       <button id="btnCalib" type="button">Auto-Calibrate</button>
-      <button id="btnManual" type="button">Manual Center</button>
+      <button id="btnManual" type="button">Perspective Calib</button>
       <button id="btnReset" type="button">Reset Track</button>
       <label class="chk"><input type="checkbox" id="chkMask" /> Show mask</label>
       <label class="chk"><input type="checkbox" id="chkTrail" checked /> Trail</label>
       <label class="chk"><input type="checkbox" id="chkCands" checked /> Candidates</label>
       <label class="chk"><input type="checkbox" id="chkWheelOF" checked /> Wheel OF</label>
+      <label class="chk"><input type="checkbox" id="chkAutoCalib" checked /> Auto re-calib</label>
     </div>
 
     <div class="sliders compact-hide">
@@ -207,7 +208,8 @@
     <p class="note compact-hide">
       Experimental visual estimate only. Sector labels require a calibrated zero-offset and
       known wheel layout; they are <strong>not</strong> a prediction of roulette outcomes.
-      Camera-only, fully client-side. Click canvas twice in Manual mode: center, then rim.
+      Camera-only, fully client-side. Perspective calibration uses three clicks:
+      wheel center, wide-axis rim, then narrow-axis rim.
     </p>
   </div>
   <div id="toast"></div>
@@ -253,7 +255,7 @@
     toast: $('toast'), video: $('webcam'), canvas: $('output'),
     hud: $('hud'), btnCompact: $('btnCompact'),
     chkMask: $('chkMask'), chkTrail: $('chkTrail'), chkCands: $('chkCands'),
-    chkWheelOF: $('chkWheelOF'),
+    chkWheelOF: $('chkWheelOF'), chkAutoCalib: $('chkAutoCalib'),
     sBright: $('sBright'), sMinArea: $('sMinArea'), sMaxArea: $('sMaxArea'),
     sInner: $('sInner'), sOuter: $('sOuter'),
     vBright: $('vBright'), vMinArea: $('vMinArea'), vMaxArea: $('vMaxArea'),
@@ -284,6 +286,8 @@
   // Wheel geometry (image coordinates)
   const wheel = {
     cx: 0, cy: 0, radius: 0,
+    radiusX: 0, radiusY: 0,
+    axisAngleRad: 0,
     calibrated: false,
     zeroOffsetDeg: 0, // experimental: angle of green zero pocket relative to +x
     zeroConfidence: 0,
@@ -291,7 +295,9 @@
 
   // Manual calibration
   let manualMode = false;
-  let manualStep = 0; // 0=await center, 1=await rim
+  let manualStep = 0; // 0=center, 1=wide-axis rim, 2=narrow-axis rim
+  let manualMajorRadius = 0;
+  let manualAxisAngle = 0;
 
   // Tracking
   const trail = []; // {x,y,t}
@@ -309,6 +315,10 @@
   let wheelOmega = 0;          // deg/s smoothed
   let wheelOmegaKf = null;
   let ofRefreshCounter = 0;
+  let lastAutoCalibTs = 0;
+  let pendingAutoCandidate = null;
+  let pendingAutoCount = 0;
+  const AUTO_CALIB_INTERVAL_MS = 1800;
 
   // Ball filters
   let ballKf = null;           // 2D CV Kalman [x,y,vx,vy]
@@ -343,6 +353,41 @@
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
   function hypot(x, y) { return Math.hypot(x, y); }
+
+  /**
+   * Convert an image point to normalized wheel-plane coordinates.
+   * A tilted circular wheel appears as an ellipse. Rotating into the ellipse
+   * axes and dividing by each radius removes the affine foreshortening before
+   * calculating angle.
+   */
+  function wheelPolarAt(x, y) {
+    const dx = x - wheel.cx;
+    const dy = y - wheel.cy;
+    const c = Math.cos(wheel.axisAngleRad || 0);
+    const s = Math.sin(wheel.axisAngleRad || 0);
+    const u = c * dx + s * dy;
+    const v = -s * dx + c * dy;
+    const rx = Math.max(1, wheel.radiusX || wheel.radius || 1);
+    const ry = Math.max(1, wheel.radiusY || wheel.radius || 1);
+    const nx = u / rx;
+    const ny = v / ry;
+    return {
+      rNorm: hypot(nx, ny),
+      rPx: hypot(dx, dy),
+      theta: ((deg(Math.atan2(ny, nx)) % 360) + 360) % 360,
+    };
+  }
+
+  function wheelImagePoint(thetaDeg, scale = 1) {
+    const a = rad(thetaDeg);
+    const phi = wheel.axisAngleRad || 0;
+    const u = Math.cos(a) * (wheel.radiusX || wheel.radius) * scale;
+    const v = Math.sin(a) * (wheel.radiusY || wheel.radius) * scale;
+    return {
+      x: wheel.cx + Math.cos(phi) * u - Math.sin(phi) * v,
+      y: wheel.cy + Math.sin(phi) * u + Math.cos(phi) * v,
+    };
+  }
 
   /** Smallest signed angle difference in degrees, range (-180, 180]. */
   function angleDeltaDeg(from, to) {
@@ -634,6 +679,9 @@
         wheel.cx = w / 2;
         wheel.cy = h / 2;
         wheel.radius = Math.min(w, h) * 0.35;
+        wheel.radiusX = wheel.radius;
+        wheel.radiusY = wheel.radius;
+        wheel.axisAngleRad = 0;
       }
       // Reset OF pyramid state on size change
       safeDelete(prevGray, wheelPoints);
@@ -713,44 +761,113 @@
    * Auto-calibrate wheel as largest high-circularity contour or Hough circle.
    * Falls back to center-weighted largest edge ring.
    */
-  function tryAutoCalibrate() {
+  function tryAutoCalibrate(silent = false, readFrame = true) {
     if (!cvReady || !mats || !capturer) return false;
     try {
-      capturer.read(mats.src);
+      if (readFrame) capturer.read(mats.src);
       cv.cvtColor(mats.src, mats.gray, cv.COLOR_RGBA2GRAY);
       cv.GaussianBlur(mats.gray, mats.blur, new cv.Size(9, 9), 2);
       cv.Canny(mats.blur, mats.edges, 60, 140);
 
-      // Prefer HoughCircles when available
+      // Primary path for an oblique camera: fit the projected circular track
+      // as an ellipse. The normalized ellipse coordinates are used throughout
+      // tracking, so this corrects most fixed-camera foreshortening.
       let best = null;
       try {
-        const circles = new cv.Mat();
-        // dp, minDist, param1, param2, minRadius, maxRadius
-        cv.HoughCircles(
-          mats.blur, circles, cv.HOUGH_GRADIENT,
-          1.2,
-          Math.min(frameW, frameH) * 0.25,
-          120, 40,
-          Math.floor(Math.min(frameW, frameH) * 0.12),
-          Math.floor(Math.min(frameW, frameH) * 0.55)
-        );
-        if (circles.cols > 0) {
-          // Pick circle closest to image center with reasonable radius
-          const imgCx = frameW / 2, imgCy = frameH / 2;
-          let bestScore = -Infinity;
-          for (let i = 0; i < circles.cols; i++) {
-            const x = circles.data32F[i * 3];
-            const y = circles.data32F[i * 3 + 1];
-            const r = circles.data32F[i * 3 + 2];
-            const dist = hypot(x - imgCx, y - imgCy);
-            const score = r - dist * 0.35; // prefer large + centered
+        const contours = new cv.MatVector();
+        const hierarchy = new cv.Mat();
+        cv.findContours(mats.edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_NONE);
+        let bestScore = -Infinity;
+        const minDim = Math.min(frameW, frameH);
+        const maxDim = Math.max(frameW, frameH);
+
+        for (let i = 0; i < contours.size(); i++) {
+          const cnt = contours.get(i);
+          try {
+            if (cnt.rows < 24) continue;
+            const e = cv.fitEllipse(cnt);
+            const rx = e.size.width / 2;
+            const ry = e.size.height / 2;
+            const major = Math.max(rx, ry);
+            const minor = Math.min(rx, ry);
+            const aspect = minor / Math.max(major, 1);
+            if (!isFinite(rx) || !isFinite(ry)) continue;
+            if (major < minDim * 0.22 || major > maxDim * 0.58) continue;
+            if (minor < minDim * 0.07 || aspect < 0.16) continue;
+            if (e.center.x < 0 || e.center.x > frameW ||
+                e.center.y < 0 || e.center.y > frameH) continue;
+
+            const centerDist = hypot(
+              e.center.x - frameW / 2, e.center.y - frameH / 2
+            );
+            const peri = cv.arcLength(cnt, true);
+            // Favour long, central, wheel-sized contours. A moderate aspect
+            // bonus rejects nearly flat reflections while still allowing the
+            // strong perspective seen in broadcast roulette footage.
+            const score =
+              Math.sqrt(rx * ry) +
+              Math.min(peri, 4 * maxDim) * 0.08 +
+              aspect * 80 -
+              centerDist * 0.18;
             if (score > bestScore) {
               bestScore = score;
-              best = { cx: x, cy: y, radius: r, method: 'hough' };
+              // Canonical representation: radiusX is always the major axis.
+              // OpenCV may swap ellipse width/height between similar frames.
+              const majorAlongWidth = rx >= ry;
+              best = {
+                cx: e.center.x,
+                cy: e.center.y,
+                radiusX: majorAlongWidth ? rx : ry,
+                radiusY: majorAlongWidth ? ry : rx,
+                axisAngleRad: rad(e.angle + (majorAlongWidth ? 0 : 90)),
+                method: 'ellipse',
+              };
             }
+          } catch (_) {
+            // Some short or degenerate contours cannot be fit.
+          } finally {
+            safeDelete(cnt);
           }
         }
-        safeDelete(circles);
+        safeDelete(contours, hierarchy);
+      } catch (e) {
+        console.warn('fitEllipse calibration failed', e);
+      }
+
+      // Frontal-camera fallback: Hough circle.
+      try {
+        if (!best) {
+          const circles = new cv.Mat();
+          // dp, minDist, param1, param2, minRadius, maxRadius
+          cv.HoughCircles(
+            mats.blur, circles, cv.HOUGH_GRADIENT,
+            1.2,
+            Math.min(frameW, frameH) * 0.25,
+            120, 40,
+            Math.floor(Math.min(frameW, frameH) * 0.12),
+            Math.floor(Math.min(frameW, frameH) * 0.55)
+          );
+          if (circles.cols > 0) {
+            // Pick circle closest to image center with reasonable radius
+            const imgCx = frameW / 2, imgCy = frameH / 2;
+            let bestScore = -Infinity;
+            for (let i = 0; i < circles.cols; i++) {
+              const x = circles.data32F[i * 3];
+              const y = circles.data32F[i * 3 + 1];
+              const r = circles.data32F[i * 3 + 2];
+              const dist = hypot(x - imgCx, y - imgCy);
+              const score = r - dist * 0.35;
+              if (score > bestScore) {
+                bestScore = score;
+                best = {
+                  cx: x, cy: y, radiusX: r, radiusY: r,
+                  axisAngleRad: 0, method: 'hough'
+                };
+              }
+            }
+          }
+          safeDelete(circles);
+        }
       } catch (e) {
         console.warn('HoughCircles failed', e);
       }
@@ -778,7 +895,11 @@
             const score = circularity * r - dist * 0.3;
             if (score > bestScore) {
               bestScore = score;
-              best = { cx: circle.center.x, cy: circle.center.y, radius: r, method: 'contour' };
+            best = {
+              cx: circle.center.x, cy: circle.center.y,
+              radiusX: r, radiusY: r, axisAngleRad: 0,
+              method: 'contour'
+            };
             }
           } finally {
             safeDelete(cnt);
@@ -788,31 +909,121 @@
       }
 
       if (best) {
-        applyCalibration(best.cx, best.cy, best.radius);
-        toast(`Calibrated (${best.method}): r=${best.radius.toFixed(0)}px`);
+        if (silent && wheel.calibrated) {
+          updateAutomaticCalibration(best);
+          return true;
+        }
+        applyCalibration(
+          best.cx, best.cy, best.radiusX, best.radiusY, best.axisAngleRad
+        );
+        toast(
+          `Calibrated (${best.method}): ` +
+          `${best.radiusX.toFixed(0)}×${best.radiusY.toFixed(0)}px`
+        );
         detectZeroOffset();
         setState(State.SEARCHING);
         return true;
       }
       // Soft fallback: centered guess
-      applyCalibration(frameW / 2, frameH / 2, Math.min(frameW, frameH) * 0.35);
-      toast('Auto-calib weak — using center guess. Prefer Manual Center.', 3500);
-      setState(State.SEARCHING);
+      if (!silent) {
+        applyCalibration(frameW / 2, frameH / 2, Math.min(frameW, frameH) * 0.35);
+        toast('Auto-calib weak — using center guess. Prefer Perspective Calib.', 3500);
+        setState(State.SEARCHING);
+      }
       return false;
     } catch (e) {
       console.error('calib', e);
-      toast('Calibration error: ' + e.message);
+      if (!silent) toast('Calibration error: ' + e.message);
       return false;
     }
   }
 
-  function applyCalibration(cx, cy, radius) {
+  function updateWheelInfo() {
+    el.wheelInfo.textContent =
+      `c=(${wheel.cx.toFixed(0)},${wheel.cy.toFixed(0)}) ` +
+      `axes=${wheel.radiusX.toFixed(0)}×${wheel.radiusY.toFixed(0)} ` +
+      `tilt=${deg(wheel.axisAngleRad).toFixed(1)}°`;
+  }
+
+  // Ellipse major-axis orientation is periodic over 180°, not 360°.
+  function ellipseAxisDelta(from, to) {
+    let d = to - from;
+    while (d > Math.PI / 2) d -= Math.PI;
+    while (d < -Math.PI / 2) d += Math.PI;
+    return d;
+  }
+
+  function autoCandidatesAgree(a, b) {
+    if (!a || !b) return false;
+    const scale = Math.max(20, (a.radiusX + b.radiusX) / 2);
+    return hypot(a.cx - b.cx, a.cy - b.cy) < scale * 0.08 &&
+      Math.abs(a.radiusX - b.radiusX) / scale < 0.1 &&
+      Math.abs(a.radiusY - b.radiusY) / Math.max(10, (a.radiusY + b.radiusY) / 2) < 0.14 &&
+      Math.abs(ellipseAxisDelta(a.axisAngleRad, b.axisAngleRad)) < rad(6);
+  }
+
+  function updateAutomaticCalibration(best) {
+    const centerShift = hypot(best.cx - wheel.cx, best.cy - wheel.cy);
+    const rxChange = Math.abs(best.radiusX - wheel.radiusX) / Math.max(1, wheel.radiusX);
+    const ryChange = Math.abs(best.radiusY - wheel.radiusY) / Math.max(1, wheel.radiusY);
+    const angleChange = Math.abs(
+      ellipseAxisDelta(wheel.axisAngleRad, best.axisAngleRad)
+    );
+    const nearCurrent =
+      centerShift < wheel.radiusX * 0.06 &&
+      rxChange < 0.1 &&
+      ryChange < 0.14 &&
+      (wheel.radiusY / wheel.radiusX > 0.9 || angleChange < rad(5));
+
+    if (nearCurrent) {
+      // Smooth tripod vibration, stream scaling, and gentle camera movement
+      // without repeatedly resetting the tracker or optical-flow features.
+      const a = 0.18;
+      wheel.cx += (best.cx - wheel.cx) * a;
+      wheel.cy += (best.cy - wheel.cy) * a;
+      wheel.radiusX += (best.radiusX - wheel.radiusX) * a;
+      wheel.radiusY += (best.radiusY - wheel.radiusY) * a;
+      wheel.axisAngleRad += ellipseAxisDelta(
+        wheel.axisAngleRad, best.axisAngleRad
+      ) * a;
+      wheel.radius = Math.max(wheel.radiusX, wheel.radiusY);
+      updateWheelInfo();
+      pendingAutoCandidate = null;
+      pendingAutoCount = 0;
+      return;
+    }
+
+    // A broadcast cut or major camera move must be observed twice before it
+    // replaces the active calibration; this rejects transient dealer/overlay
+    // contours that happen to resemble a large ellipse.
+    if (autoCandidatesAgree(best, pendingAutoCandidate)) {
+      pendingAutoCount++;
+    } else {
+      pendingAutoCandidate = { ...best };
+      pendingAutoCount = 1;
+    }
+    if (pendingAutoCount < 2) return;
+
+    applyCalibration(
+      best.cx, best.cy, best.radiusX, best.radiusY, best.axisAngleRad
+    );
+    pendingAutoCandidate = null;
+    pendingAutoCount = 0;
+    resetTrack();
+    detectZeroOffset();
+    setStatus('STATUS: Camera view changed — recalibrated');
+    toast('Camera change detected — perspective recalibrated', 3000);
+  }
+
+  function applyCalibration(cx, cy, radiusX, radiusY = radiusX, axisAngleRad = 0) {
     wheel.cx = cx;
     wheel.cy = cy;
-    wheel.radius = radius;
+    wheel.radiusX = Math.max(2, radiusX);
+    wheel.radiusY = Math.max(2, radiusY);
+    wheel.radius = Math.max(wheel.radiusX, wheel.radiusY);
+    wheel.axisAngleRad = axisAngleRad;
     wheel.calibrated = true;
-    el.wheelInfo.textContent =
-      `c=(${cx.toFixed(0)},${cy.toFixed(0)}) r=${radius.toFixed(0)}`;
+    updateWheelInfo();
     // Seed OF features on rim
     safeDelete(prevGray, wheelPoints);
     prevGray = null;
@@ -840,21 +1051,21 @@
 
       // Restrict to annular band near pockets (~70–95% of radius)
       mats.maskRoi.setTo(new cv.Scalar(0));
-      cv.circle(mats.maskRoi,
+      cv.ellipse(mats.maskRoi,
         new cv.Point(wheel.cx | 0, wheel.cy | 0),
-        (wheel.radius * 0.95) | 0,
-        new cv.Scalar(255), -1);
-      cv.circle(mats.maskRoi,
+        new cv.Size((wheel.radiusX * 0.95) | 0, (wheel.radiusY * 0.95) | 0),
+        deg(wheel.axisAngleRad), 0, 360, new cv.Scalar(255), -1);
+      cv.ellipse(mats.maskRoi,
         new cv.Point(wheel.cx | 0, wheel.cy | 0),
-        (wheel.radius * 0.55) | 0,
-        new cv.Scalar(0), -1);
+        new cv.Size((wheel.radiusX * 0.55) | 0, (wheel.radiusY * 0.55) | 0),
+        deg(wheel.axisAngleRad), 0, 360, new cv.Scalar(0), -1);
       cv.bitwise_and(mats.maskGreen, mats.maskRoi, mats.mask);
 
       const m = cv.moments(mats.mask, true);
       if (m.m00 > 80) {
         const gx = m.m10 / m.m00;
         const gy = m.m01 / m.m00;
-        wheel.zeroOffsetDeg = ((deg(Math.atan2(gy - wheel.cy, gx - wheel.cx)) % 360) + 360) % 360;
+        wheel.zeroOffsetDeg = wheelPolarAt(gx, gy).theta;
         wheel.zeroConfidence = clamp(m.m00 / 2000, 0, 1);
       } else {
         wheel.zeroConfidence = 0;
@@ -868,12 +1079,17 @@
   // ─── Ball detection ─────────────────────────────────────────────────────────
   function buildAnnulusMask(innerScale, outerScale) {
     mats.maskRoi.setTo(new cv.Scalar(0));
-    const cx = wheel.cx | 0, cy = wheel.cy | 0;
-    const rOut = Math.max(2, (wheel.radius * outerScale) | 0);
-    const rIn = Math.max(1, (wheel.radius * innerScale) | 0);
-    cv.circle(mats.maskRoi, new cv.Point(cx, cy), rOut, new cv.Scalar(255), -1);
-    if (rIn < rOut) {
-      cv.circle(mats.maskRoi, new cv.Point(cx, cy), rIn, new cv.Scalar(0), -1);
+    const center = new cv.Point(wheel.cx | 0, wheel.cy | 0);
+    const outX = Math.max(2, (wheel.radiusX * outerScale) | 0);
+    const outY = Math.max(2, (wheel.radiusY * outerScale) | 0);
+    const inX = Math.max(1, (wheel.radiusX * innerScale) | 0);
+    const inY = Math.max(1, (wheel.radiusY * innerScale) | 0);
+    const angle = deg(wheel.axisAngleRad);
+    cv.ellipse(mats.maskRoi, center, new cv.Size(outX, outY),
+      angle, 0, 360, new cv.Scalar(255), -1);
+    if (inX < outX && inY < outY) {
+      cv.ellipse(mats.maskRoi, center, new cv.Size(inX, inY),
+        angle, 0, 360, new cv.Scalar(0), -1);
     }
   }
 
@@ -920,8 +1136,9 @@
         const cy = mom.m01 / mom.m00;
 
         // Radial gate relative to wheel
-        const rr = hypot(cx - wheel.cx, cy - wheel.cy);
-        const rNorm = wheel.radius > 1 ? rr / wheel.radius : 0;
+        const polar = wheelPolarAt(cx, cy);
+        const rr = polar.rPx;
+        const rNorm = polar.rNorm;
         if (rNorm < innerPct / 100 * 0.9 || rNorm > outerPct / 100 * 1.05) continue;
 
         // Mean brightness under contour (sample via bounding rect on gray)
@@ -960,7 +1177,7 @@
 
         list.push({
           x: cx, y: cy, area, circularity, meanBright, r: rr, rNorm,
-          theta: deg(Math.atan2(cy - wheel.cy, cx - wheel.cx)),
+          theta: polar.theta,
           score, rect,
         });
       } finally {
@@ -986,10 +1203,12 @@
     if (needRefresh) {
       // Mask a thin rim band for goodFeaturesToTrack
       mats.maskRoi.setTo(new cv.Scalar(0));
-      cv.circle(mats.maskRoi, new cv.Point(wheel.cx | 0, wheel.cy | 0),
-        (wheel.radius * 0.92) | 0, new cv.Scalar(255), -1);
-      cv.circle(mats.maskRoi, new cv.Point(wheel.cx | 0, wheel.cy | 0),
-        (wheel.radius * 0.62) | 0, new cv.Scalar(0), -1);
+      cv.ellipse(mats.maskRoi, new cv.Point(wheel.cx | 0, wheel.cy | 0),
+        new cv.Size((wheel.radiusX * 0.92) | 0, (wheel.radiusY * 0.92) | 0),
+        deg(wheel.axisAngleRad), 0, 360, new cv.Scalar(255), -1);
+      cv.ellipse(mats.maskRoi, new cv.Point(wheel.cx | 0, wheel.cy | 0),
+        new cv.Size((wheel.radiusX * 0.62) | 0, (wheel.radiusY * 0.62) | 0),
+        deg(wheel.axisAngleRad), 0, 360, new cv.Scalar(0), -1);
 
       const pts = new cv.Mat();
       cv.goodFeaturesToTrack(mats.gray, pts, 40, 0.08, 8, mats.maskRoi, 7);
@@ -1028,16 +1247,15 @@
       const y0 = wheelPoints.data32F[i * 2 + 1];
       const x1 = nextPts.data32F[i * 2];
       const y1 = nextPts.data32F[i * 2 + 1];
-      const a0 = Math.atan2(y0 - wheel.cy, x0 - wheel.cx);
-      const a1 = Math.atan2(y1 - wheel.cy, x1 - wheel.cx);
-      let da = a1 - a0;
+      const p0 = wheelPolarAt(x0, y0);
+      const p1 = wheelPolarAt(x1, y1);
+      let da = rad(angleDeltaDeg(p0.theta, p1.theta));
       // unwrap to [-pi, pi]
       while (da > Math.PI) da -= 2 * Math.PI;
       while (da < -Math.PI) da += 2 * Math.PI;
       // Reject outliers (ball motion / bad tracks)
       if (Math.abs(da) > 0.35) continue; // ~20 deg/frame is huge
-      const r0 = hypot(x0 - wheel.cx, y0 - wheel.cy);
-      if (r0 < wheel.radius * 0.55 || r0 > wheel.radius * 0.98) continue;
+      if (p0.rNorm < 0.55 || p0.rNorm > 0.98) continue;
       sumD += da;
       n++;
       kept.push(x1, y1);
@@ -1105,16 +1323,19 @@
       ctx.strokeStyle = 'rgba(45,255,154,0.85)';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(wheel.cx, wheel.cy, wheel.radius, 0, Math.PI * 2);
+      ctx.ellipse(wheel.cx, wheel.cy, wheel.radiusX, wheel.radiusY,
+        wheel.axisAngleRad, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([6, 4]);
       ctx.strokeStyle = 'rgba(77,195,255,0.7)';
       ctx.beginPath();
-      ctx.arc(wheel.cx, wheel.cy, wheel.radius * outer, 0, Math.PI * 2);
+      ctx.ellipse(wheel.cx, wheel.cy, wheel.radiusX * outer, wheel.radiusY * outer,
+        wheel.axisAngleRad, 0, Math.PI * 2);
       ctx.stroke();
       ctx.strokeStyle = 'rgba(255,204,51,0.55)';
       ctx.beginPath();
-      ctx.arc(wheel.cx, wheel.cy, wheel.radius * inner, 0, Math.PI * 2);
+      ctx.ellipse(wheel.cx, wheel.cy, wheel.radiusX * inner, wheel.radiusY * inner,
+        wheel.axisAngleRad, 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
       // Center crosshair
@@ -1126,17 +1347,17 @@
 
       // Zero offset ray
       if (wheel.zeroConfidence > 0.15) {
-        const a = rad(wheel.zeroOffsetDeg);
+        const zp = wheelImagePoint(wheel.zeroOffsetDeg);
+        const zl = wheelImagePoint(wheel.zeroOffsetDeg, 0.7);
         ctx.strokeStyle = 'rgba(0,255,120,0.9)';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(wheel.cx, wheel.cy);
-        ctx.lineTo(wheel.cx + Math.cos(a) * wheel.radius, wheel.cy + Math.sin(a) * wheel.radius);
+        ctx.lineTo(zp.x, zp.y);
         ctx.stroke();
         ctx.fillStyle = '#2dff9a';
         ctx.font = '12px monospace';
-        ctx.fillText('0° ref', wheel.cx + Math.cos(a) * wheel.radius * 0.7,
-          wheel.cy + Math.sin(a) * wheel.radius * 0.7);
+        ctx.fillText('0° ref', zl.x, zl.y);
       }
       ctx.restore();
     }
@@ -1212,7 +1433,9 @@
       ctx.fillStyle = '#ffcc33';
       ctx.font = '14px monospace';
       ctx.fillText(
-        manualStep === 0 ? 'MANUAL: click wheel CENTER' : 'MANUAL: click outer RIM',
+        manualStep === 0 ? 'PERSPECTIVE: click wheel CENTER' :
+        manualStep === 1 ? 'PERSPECTIVE: click WIDE-AXIS rim (left or right)' :
+        'PERSPECTIVE: click NARROW-AXIS rim (top or bottom)',
         12, 24
       );
       ctx.restore();
@@ -1262,6 +1485,14 @@
       // Show camera frame
       frameStage = 'display';
       cv.imshow(el.canvas, mats.src);
+
+      if (el.chkAutoCalib.checked && wheel.calibrated && !manualMode &&
+          appState !== State.CALIBRATING &&
+          ts - lastAutoCalibTs >= AUTO_CALIB_INTERVAL_MS) {
+        frameStage = 'automatic perspective calibration';
+        lastAutoCalibTs = ts;
+        tryAutoCalibrate(true, false);
+      }
 
       // Params
       const brightThr = +el.sBright.value;
@@ -1320,10 +1551,11 @@
 
             // Polar display uses KF position for stability
             const px = ballKf.pos.x, py = ballKf.pos.y;
-            const pr = hypot(px - wheel.cx, py - wheel.cy);
-            const pth = ((deg(Math.atan2(py - wheel.cy, px - wheel.cx)) % 360) + 360) % 360;
+            const pp = wheelPolarAt(px, py);
+            const pr = pp.rNorm;
+            const pth = pp.theta;
 
-            el.polar.textContent = `${pr.toFixed(1)} px · ${pth.toFixed(1)}°`;
+            el.polar.textContent = `${pr.toFixed(3)} R · ${pth.toFixed(1)}°`;
             el.velocity.textContent = `${speedSm.toFixed(0)} px/s`;
             el.angularVel.textContent = `${ang.omega.toFixed(1)} °/s`;
             el.confidence.textContent = `${(conf * 100).toFixed(0)}%`;
@@ -1343,13 +1575,14 @@
             setState(State.COASTING);
             // Coast: use predicted pos for trail / polar
             const px = ballKf.pos.x, py = ballKf.pos.y;
-            const pr = hypot(px - wheel.cx, py - wheel.cy);
-            const pth = ((deg(Math.atan2(py - wheel.cy, px - wheel.cx)) % 360) + 360) % 360;
+            const pp = wheelPolarAt(px, py);
+            const pr = pp.rNorm;
+            const pth = pp.theta;
             // Still unwrap using predicted angle for continuity (lower trust)
             angleTracker.observe(pth, tSec);
             conf = clamp(0.4 * (1 - lostFrames / LOST_SEARCH_AFTER), 0, 0.4);
             el.confidence.textContent = `${(conf * 100).toFixed(0)}% (coast)`;
-            el.polar.textContent = `${pr.toFixed(1)} px · ${pth.toFixed(1)}°`;
+            el.polar.textContent = `${pr.toFixed(3)} R · ${pth.toFixed(1)}°`;
             const v = ballKf.vel;
             el.velocity.textContent = `${hypot(v.x, v.y).toFixed(0)} px/s`;
             el.angularVel.textContent = `${angleTracker.omega.toFixed(1)} °/s`;
@@ -1415,10 +1648,26 @@
     if (manualStep === 0) {
       wheel.cx = x; wheel.cy = y;
       manualStep = 1;
-      toast('Now click the outer rim');
+      toast('Now click the wide-axis rim (left or right)');
+    } else if (manualStep === 1) {
+      const dx = x - wheel.cx;
+      const dy = y - wheel.cy;
+      manualMajorRadius = hypot(dx, dy);
+      manualAxisAngle = Math.atan2(dy, dx);
+      manualStep = 2;
+      toast('Now click the narrow-axis rim (top or bottom)');
     } else {
-      const r = hypot(x - wheel.cx, y - wheel.cy);
-      applyCalibration(wheel.cx, wheel.cy, r);
+      const dx = x - wheel.cx;
+      const dy = y - wheel.cy;
+      // Project onto the axis perpendicular to the wide axis. This rejects
+      // small click errors along the major axis.
+      let minorRadius = Math.abs(
+        -Math.sin(manualAxisAngle) * dx + Math.cos(manualAxisAngle) * dy
+      );
+      if (minorRadius < 2) minorRadius = hypot(dx, dy);
+      applyCalibration(
+        wheel.cx, wheel.cy, manualMajorRadius, minorRadius, manualAxisAngle
+      );
       // Try zero detection on current frame buffer
       try {
         if (capturer && mats) {
@@ -1429,7 +1678,10 @@
       manualMode = false;
       manualStep = 0;
       setState(State.SEARCHING);
-      toast(`Manual calib r=${r.toFixed(0)}px`);
+      toast(
+        `Perspective calibrated: ${manualMajorRadius.toFixed(0)}×` +
+        `${minorRadius.toFixed(0)}px`
+      );
       el.canvas.style.cursor = 'crosshair';
     }
   });
@@ -1475,7 +1727,7 @@
     manualMode = true;
     manualStep = 0;
     setState(State.CALIBRATING);
-    toast('Manual calibration: click center, then rim');
+    toast('Perspective calibration: center, wide rim, narrow rim');
   });
   $('btnReset').addEventListener('click', resetTrack);
 
