@@ -57,9 +57,28 @@
       box-shadow: 0 8px 32px rgba(0,0,0,0.55);
     }
     #hud h1 {
-      margin: 0 0 6px; font-size: 14px; letter-spacing: 0.08em;
+      margin: 0; font-size: 14px; letter-spacing: 0.08em;
       color: var(--accent); font-weight: 700;
     }
+    .hud-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 6px;
+    }
+    #btnCompact {
+      padding: 4px 7px;
+      min-width: 70px;
+      background: transparent;
+      color: var(--muted);
+      border-color: rgba(31,168,106,0.55);
+      font-size: 9px;
+      letter-spacing: 0.06em;
+    }
+    #btnCompact:hover { color: var(--accent); }
+    #hud.compact {
+      width: min(340px, calc(100vw - 20px));
+      overflow: hidden;
+    }
+    #hud.compact .compact-hide { display: none !important; }
     .row {
       display: flex; justify-content: space-between; gap: 8px;
       font-size: 12px; line-height: 1.55; color: var(--text);
@@ -127,22 +146,26 @@
   </div>
 
   <div id="hud">
-    <h1>ROULETTE VISION PRO</h1>
+    <div class="hud-head">
+      <h1>ROULETTE VISION PRO</h1>
+      <button id="btnCompact" type="button" aria-expanded="true"
+              aria-controls="hud" title="Hide controls and secondary diagnostics">MINIMIZE</button>
+    </div>
     <div class="row"><span class="k">STATUS</span><span class="v" id="status">STATUS: Booting…</span></div>
     <div class="row"><span class="k">STATE</span><span class="v"><span id="stateBadge" class="badge info">INIT</span></span></div>
     <div class="row"><span class="k">FPS</span><span class="v" id="fps">—</span></div>
     <div class="row"><span class="k">CONFIDENCE</span><span class="v" id="confidence">—</span></div>
     <div class="sep"></div>
-    <div class="row"><span class="k">BALL r / θ</span><span class="v" id="polar">—</span></div>
+    <div class="row compact-hide"><span class="k">BALL r / θ</span><span class="v" id="polar">—</span></div>
     <div class="row"><span class="k">LINEAR VEL</span><span class="v" id="velocity">—</span></div>
     <div class="row"><span class="k">BALL ω</span><span class="v" id="angularVel">—</span></div>
     <div class="row"><span class="k">WHEEL ω</span><span class="v" id="wheelVel">—</span></div>
     <div class="row"><span class="k">RELATIVE ω</span><span class="v" id="relVel">—</span></div>
     <div class="row"><span class="k">SECTOR EST.</span><span class="v" id="prediction">—</span></div>
-    <div class="row"><span class="k">WHEEL</span><span class="v" id="wheelInfo">uncalibrated</span></div>
-    <div class="row"><span class="k">CANDIDATES</span><span class="v" id="candInfo">0</span></div>
+    <div class="row compact-hide"><span class="k">WHEEL</span><span class="v" id="wheelInfo">uncalibrated</span></div>
+    <div class="row compact-hide"><span class="k">CANDIDATES</span><span class="v" id="candInfo">0</span></div>
 
-    <div class="controls">
+    <div class="controls compact-hide">
       <button class="primary" id="btnStart" type="button">Start Camera</button>
       <button id="btnCalib" type="button">Auto-Calibrate</button>
       <button id="btnManual" type="button">Manual Center</button>
@@ -153,7 +176,7 @@
       <label class="chk"><input type="checkbox" id="chkWheelOF" checked /> Wheel OF</label>
     </div>
 
-    <div class="sliders">
+    <div class="sliders compact-hide">
       <div class="slider-row">
         <span>Bright thr</span>
         <input type="range" id="sBright" min="140" max="250" value="200" />
@@ -181,7 +204,7 @@
       </div>
     </div>
 
-    <p class="note">
+    <p class="note compact-hide">
       Experimental visual estimate only. Sector labels require a calibrated zero-offset and
       known wheel layout; they are <strong>not</strong> a prediction of roulette outcomes.
       Camera-only, fully client-side. Click canvas twice in Manual mode: center, then rim.
@@ -228,6 +251,7 @@
     angularVel: $('angularVel'), wheelVel: $('wheelVel'), relVel: $('relVel'),
     prediction: $('prediction'), wheelInfo: $('wheelInfo'), candInfo: $('candInfo'),
     toast: $('toast'), video: $('webcam'), canvas: $('output'),
+    hud: $('hud'), btnCompact: $('btnCompact'),
     chkMask: $('chkMask'), chkTrail: $('chkTrail'), chkCands: $('chkCands'),
     chkWheelOF: $('chkWheelOF'),
     sBright: $('sBright'), sMinArea: $('sMinArea'), sMaxArea: $('sMaxArea'),
@@ -568,7 +592,10 @@
       blur: new cv.Mat(),
       maskBright: new cv.Mat(),
       maskGreen: new cv.Mat(),
-      maskRoi: new cv.Mat(),
+      // Drawing functions such as cv.circle() require a preallocated
+      // destination. An empty Mat here can crash the WASM heap with
+      // "memory access out of bounds".
+      maskRoi: cv.Mat.zeros(h, w, cv.CV_8UC1),
       mask: new cv.Mat(),
       edges: new cv.Mat(),
       work: new cv.Mat(),
@@ -736,21 +763,25 @@
         let bestScore = -Infinity;
         for (let i = 0; i < contours.size(); i++) {
           const cnt = contours.get(i);
-          const area = cv.contourArea(cnt);
-          if (area < 2000) { continue; }
-          const peri = cv.arcLength(cnt, true);
-          if (peri < 1) continue;
-          const circularity = 4 * Math.PI * area / (peri * peri);
-          if (circularity < 0.55) continue;
-          const circle = cv.minEnclosingCircle(cnt);
-          const r = circle.radius;
-          if (r < Math.min(frameW, frameH) * 0.12) continue;
-          if (r > Math.min(frameW, frameH) * 0.55) continue;
-          const dist = hypot(circle.center.x - frameW / 2, circle.center.y - frameH / 2);
-          const score = circularity * r - dist * 0.3;
-          if (score > bestScore) {
-            bestScore = score;
-            best = { cx: circle.center.x, cy: circle.center.y, radius: r, method: 'contour' };
+          try {
+            const area = cv.contourArea(cnt);
+            if (area < 2000) { continue; }
+            const peri = cv.arcLength(cnt, true);
+            if (peri < 1) continue;
+            const circularity = 4 * Math.PI * area / (peri * peri);
+            if (circularity < 0.55) continue;
+            const circle = cv.minEnclosingCircle(cnt);
+            const r = circle.radius;
+            if (r < Math.min(frameW, frameH) * 0.12) continue;
+            if (r > Math.min(frameW, frameH) * 0.55) continue;
+            const dist = hypot(circle.center.x - frameW / 2, circle.center.y - frameH / 2);
+            const score = circularity * r - dist * 0.3;
+            if (score > bestScore) {
+              bestScore = score;
+              best = { cx: circle.center.x, cy: circle.center.y, radius: r, method: 'contour' };
+            }
+          } finally {
+            safeDelete(cnt);
           }
         }
         safeDelete(contours, hierarchy);
@@ -875,62 +906,67 @@
 
     for (let i = 0; i < contours.size(); i++) {
       const cnt = contours.get(i);
-      const area = cv.contourArea(cnt);
-      if (area < minArea || area > maxArea) continue;
-      const peri = cv.arcLength(cnt, true);
-      if (peri < 1e-3) continue;
-      const circularity = 4 * Math.PI * area / (peri * peri);
-      if (circularity < 0.45) continue;
+      try {
+        const area = cv.contourArea(cnt);
+        if (area < minArea || area > maxArea) continue;
+        const peri = cv.arcLength(cnt, true);
+        if (peri < 1e-3) continue;
+        const circularity = 4 * Math.PI * area / (peri * peri);
+        if (circularity < 0.45) continue;
 
-      const mom = cv.moments(cnt);
-      if (mom.m00 < 1e-3) continue;
-      const cx = mom.m10 / mom.m00;
-      const cy = mom.m01 / mom.m00;
+        const mom = cv.moments(cnt);
+        if (mom.m00 < 1e-3) continue;
+        const cx = mom.m10 / mom.m00;
+        const cy = mom.m01 / mom.m00;
 
-      // Radial gate relative to wheel
-      const rr = hypot(cx - wheel.cx, cy - wheel.cy);
-      const rNorm = wheel.radius > 1 ? rr / wheel.radius : 0;
-      if (rNorm < innerPct / 100 * 0.9 || rNorm > outerPct / 100 * 1.05) continue;
+        // Radial gate relative to wheel
+        const rr = hypot(cx - wheel.cx, cy - wheel.cy);
+        const rNorm = wheel.radius > 1 ? rr / wheel.radius : 0;
+        if (rNorm < innerPct / 100 * 0.9 || rNorm > outerPct / 100 * 1.05) continue;
 
-      // Mean brightness under contour (sample via bounding rect on gray)
-      const rect = cv.boundingRect(cnt);
-      let brightSum = 0, brightN = 0;
-      const x0 = rect.x, y0 = rect.y, x1 = x0 + rect.width, y1 = y0 + rect.height;
-      for (let yy = y0; yy < y1; yy += 2) {
-        for (let xx = x0; xx < x1; xx += 2) {
-          // pointPolygonTest is expensive; use circle approx
-          if (hypot(xx - cx, yy - cy) <= Math.sqrt(area / Math.PI) * 1.1) {
-            brightSum += mats.gray.ucharAt(yy, xx);
-            brightN++;
+        // Mean brightness under contour (sample via bounding rect on gray)
+        const rect = cv.boundingRect(cnt);
+        let brightSum = 0, brightN = 0;
+        const x0 = rect.x, y0 = rect.y, x1 = x0 + rect.width, y1 = y0 + rect.height;
+        for (let yy = y0; yy < y1; yy += 2) {
+          for (let xx = x0; xx < x1; xx += 2) {
+            // pointPolygonTest is expensive; use circle approx
+            if (hypot(xx - cx, yy - cy) <= Math.sqrt(area / Math.PI) * 1.1) {
+              brightSum += mats.gray.ucharAt(yy, xx);
+              brightN++;
+            }
           }
         }
+        const meanBright = brightN ? brightSum / brightN : 0;
+
+        // Continuity score vs KF prediction
+        let cont = 0.5;
+        if (pred) {
+          const d = hypot(cx - pred.x, cy - pred.y);
+          cont = Math.exp(-d * d / (2 * 35 * 35));
+        } else if (lastMeas) {
+          const d = hypot(cx - lastMeas.x, cy - lastMeas.y);
+          cont = Math.exp(-d * d / (2 * 50 * 50));
+        }
+
+        // Prefer ball near outer track (typical roulette track ~0.85–1.0 R early, then drops)
+        const radialPref = Math.exp(-Math.pow((rNorm - 0.9) / 0.25, 2));
+
+        const score =
+          0.35 * clamp(circularity, 0, 1) +
+          0.25 * clamp((meanBright - brightThr) / (255 - brightThr), 0, 1) +
+          0.25 * cont +
+          0.15 * radialPref;
+
+        list.push({
+          x: cx, y: cy, area, circularity, meanBright, r: rr, rNorm,
+          theta: deg(Math.atan2(cy - wheel.cy, cx - wheel.cx)),
+          score, rect,
+        });
+      } finally {
+        // MatVector.get() returns a Mat wrapper that must be released.
+        safeDelete(cnt);
       }
-      const meanBright = brightN ? brightSum / brightN : 0;
-
-      // Continuity score vs KF prediction
-      let cont = 0.5;
-      if (pred) {
-        const d = hypot(cx - pred.x, cy - pred.y);
-        cont = Math.exp(-d * d / (2 * 35 * 35));
-      } else if (lastMeas) {
-        const d = hypot(cx - lastMeas.x, cy - lastMeas.y);
-        cont = Math.exp(-d * d / (2 * 50 * 50));
-      }
-
-      // Prefer ball near outer track (typical roulette track ~0.85–1.0 R early, then drops)
-      const radialPref = Math.exp(-Math.pow((rNorm - 0.9) / 0.25, 2));
-
-      const score =
-        0.35 * clamp(circularity, 0, 1) +
-        0.25 * clamp((meanBright - brightThr) / (255 - brightThr), 0, 1) +
-        0.25 * cont +
-        0.15 * radialPref;
-
-      list.push({
-        x: cx, y: cy, area, circularity, meanBright, r: rr, rNorm,
-        theta: deg(Math.atan2(cy - wheel.cy, cx - wheel.cx)),
-        score, rect,
-      });
     }
     safeDelete(contours, hierarchy);
     list.sort((a, b) => b.score - a.score);
@@ -1220,9 +1256,11 @@
       el.fps.textContent = fpsEma.toFixed(1);
     }
 
+    let frameStage = 'capture';
     try {
       capturer.read(mats.src);
       // Show camera frame
+      frameStage = 'display';
       cv.imshow(el.canvas, mats.src);
 
       // Params
@@ -1243,6 +1281,7 @@
       let conf = 0;
 
       if (wheel.calibrated && appState !== State.CALIBRATING && !manualMode) {
+        frameStage = 'ball detection';
         cands = detectBallCandidates(brightThr, minArea, maxArea, innerPct, outerPct);
         candidatesLast = cands;
         el.candInfo.textContent = String(cands.length);
@@ -1332,6 +1371,7 @@
         }
 
         // Wheel rotation
+        frameStage = 'wheel optical flow';
         updateWheelOpticalFlow(dt);
         el.wheelVel.textContent = `${wheelOmega.toFixed(1)} °/s`;
         const rel = (angleTracker.omega || 0) - wheelOmega;
@@ -1340,10 +1380,11 @@
         el.candInfo.textContent = '—';
       }
 
+      frameStage = 'debug overlays';
       drawOverlays(meas, cands, conf);
     } catch (e) {
-      console.error('frame error', e);
-      setStatus('STATUS: Frame error — ' + e.message);
+      console.error('frame error during ' + frameStage, e);
+      setStatus('STATUS: Frame error (' + frameStage + ') — ' + e.message);
     }
   }
 
@@ -1404,6 +1445,19 @@
   bindSlider(el.sMaxArea, el.vMaxArea);
   bindSlider(el.sInner, el.vInner);
   bindSlider(el.sOuter, el.vOuter);
+
+  function setCompactHud(compact) {
+    el.hud.classList.toggle('compact', compact);
+    el.btnCompact.textContent = compact ? 'EXPAND' : 'MINIMIZE';
+    el.btnCompact.setAttribute('aria-expanded', String(!compact));
+    el.btnCompact.title = compact
+      ? 'Show controls and all diagnostics'
+      : 'Hide controls and secondary diagnostics';
+  }
+
+  el.btnCompact.addEventListener('click', () => {
+    setCompactHud(!el.hud.classList.contains('compact'));
+  });
 
   $('btnStart').addEventListener('click', () => {
     if (!cvReady) { toast('Wait for OpenCV.js…'); return; }
@@ -1474,5 +1528,333 @@
     }
   });
   </script>
-</body>
+<script data-pplx-inline-edit>
+(function () {
+  if (window === window.top) return;
+
+  const allowedParentOrigins = ["https://www.perplexity.ai","https://perplexity.ai","https://testing.perplexity.ai","https://staging.perplexity.ai","https://*.preview.i.perplexity.ai","http://perplexity.localhost","http://localhost:1420","http://127.0.0.1:1420","http://localhost:3000","http://127.0.0.1:3000","http://localhost:5173","http://127.0.0.1:5173"];
+  const MAX_FONT_BYTES = 500 * 1024;
+  const MAX_TOTAL_FONT_BYTES = 2 * 1024 * 1024;
+  let scrollForwarding = false;
+  let scrollRaf = 0;
+  let trustedTopOrigin = null;
+
+  // Allow entries like "https://*.preview.i.perplexity.ai" — the wildcard
+  // matches a single DNS label (no dots), so "https://*.foo" cannot stretch
+  // across multiple labels.
+  function matchesAllowedOrigin(origin) {
+    if (!origin) return false;
+    for (const entry of allowedParentOrigins) {
+      if (!entry.includes("*")) {
+        if (entry === origin) return true;
+        continue;
+      }
+      const pattern = new RegExp(
+        "^" +
+          entry.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^.]+") +
+          "$",
+      );
+      if (pattern.test(origin)) return true;
+    }
+    return false;
+  }
+
+  // Trust decision: when the sender is same-origin-visible (event.origin is a
+  // real origin like https://www.perplexity.ai) we trust event.origin directly.
+  // When event.origin is "null" (opaque broker srcdoc), we fall back to the
+  // broker's stamped `parentOrigin` to identify the top window. The fallback
+  // is claim-only — we rely on the browser's native `targetOrigin` enforcement
+  // on the response path (see postToTrustedTop) to ensure replies can't be
+  // delivered to anyone but the actual top window of that claimed origin.
+  function getTrustedParentOrigin(event) {
+    const forwardedParentOrigin =
+      typeof event.data.parentOrigin === "string" ? event.data.parentOrigin : null;
+    const parentOrigin = event.origin === "null" ? forwardedParentOrigin : event.origin;
+    return matchesAllowedOrigin(parentOrigin) ? parentOrigin : null;
+  }
+
+  // All responses go to window.top with targetOrigin = the allowlisted origin.
+  // An attacker that iframes us inside their own null-origin broker can claim
+  // any parentOrigin they like, but the browser will drop the reply whenever
+  // the real top's origin doesn't match — so the screenshot never leaves.
+  function postToTrustedTop(message) {
+    if (!trustedTopOrigin) return;
+    try {
+      window.top.postMessage(message, trustedTopOrigin);
+    } catch (_error) {}
+  }
+
+  function inlineAll(original, clone) {
+    if (original.nodeType !== 1 || clone.nodeType !== 1) return;
+
+    try {
+      const computedStyle = getComputedStyle(original);
+      // cssText on a computed style is the serialized declaration in modern
+      // Chromium/Safari — a single read beats enumerating ~400 longhand
+      // properties. Firefox returns "" here, so we fall back on empty.
+      const serialized = computedStyle.cssText;
+      if (serialized) {
+        clone.style.cssText = serialized;
+      } else {
+        const parts = new Array(computedStyle.length);
+        for (let index = 0; index < computedStyle.length; index += 1) {
+          const property = computedStyle[index];
+          parts[index] = `${property}:${computedStyle.getPropertyValue(property)};`;
+        }
+        clone.style.cssText = parts.join("");
+      }
+    } catch (_error) {}
+
+    const originalChildren = original.children;
+    const clonedChildren = clone.children;
+    for (
+      let index = 0;
+      index < originalChildren.length && index < clonedChildren.length;
+      index += 1
+    ) {
+      inlineAll(originalChildren[index], clonedChildren[index]);
+    }
+  }
+
+  function extractFontUrl(srcValue) {
+    const matches = [
+      ...srcValue.matchAll(
+        /url\(["']?([^"')]+)["']?\)(?:\s*format\(["']?([^"')]+)["']?\))?/gi,
+      ),
+    ];
+    if (matches.length === 0) return null;
+    const woff2 = matches.find((m) => m[2] && m[2].toLowerCase().includes("woff2"));
+    if (woff2) return woff2[1];
+    const woff = matches.find((m) => m[2] && m[2].toLowerCase().includes("woff"));
+    if (woff) return woff[1];
+    return matches[0][1];
+  }
+
+  // Cache resolved font URL -> data URI across captures. Fonts on a page
+  // essentially never change, and a batch run emits multiple captures back to
+  // back — without this we'd refetch + re-base64 every time.
+  const fontDataUriCache = new Map();
+  const SRC_DECLARATION_RE = /src\s*:\s*[^;}]+/i;
+
+  async function fetchAsDataUri(url) {
+    if (fontDataUriCache.has(url)) return fontDataUriCache.get(url);
+    let dataUri = null;
+    try {
+      const response = await fetch(url, { mode: "cors", credentials: "omit" });
+      if (response.ok) {
+        const blob = await response.blob();
+        if (blob.size <= MAX_FONT_BYTES) {
+          dataUri = await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () =>
+              resolve(typeof reader.result === "string" ? reader.result : null);
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(blob);
+          });
+        }
+      }
+    } catch (_error) {
+      dataUri = null;
+    }
+    fontDataUriCache.set(url, dataUri);
+    return dataUri;
+  }
+
+  function collectFontFaceRuleTexts() {
+    const rules = [];
+    for (const sheet of document.styleSheets) {
+      let cssRules;
+      try {
+        cssRules = sheet.cssRules;
+      } catch (_error) {
+        continue;
+      }
+      if (!cssRules) continue;
+      for (const rule of cssRules) {
+        const cssText = rule.cssText || "";
+        if (cssText.startsWith("@font-face")) rules.push(cssText);
+      }
+    }
+    return rules;
+  }
+
+  async function buildInlinedFontCss() {
+    const ruleTexts = collectFontFaceRuleTexts();
+    if (ruleTexts.length === 0) return null;
+
+    const resolved = ruleTexts.map((cssText) => {
+      if (!SRC_DECLARATION_RE.test(cssText)) return null;
+      const srcMatch = cssText.match(/src\s*:\s*([^;}]+)[;}]/i);
+      if (!srcMatch) return null;
+      const url = extractFontUrl(srcMatch[1]);
+      if (!url) return null;
+      try {
+        return { cssText, url: new URL(url, document.baseURI).href };
+      } catch (_error) {
+        return null;
+      }
+    });
+
+    const dataUris = await Promise.all(
+      resolved.map((entry) => (entry ? fetchAsDataUri(entry.url) : Promise.resolve(null))),
+    );
+
+    const inlined = [];
+    let totalBytes = 0;
+    for (let index = 0; index < resolved.length; index += 1) {
+      const entry = resolved[index];
+      const dataUri = dataUris[index];
+      if (!entry || !dataUri) continue;
+      const approxBytes = dataUri.length * 0.75;
+      if (totalBytes + approxBytes > MAX_TOTAL_FONT_BYTES) break;
+      totalBytes += approxBytes;
+      inlined.push(entry.cssText.replace(SRC_DECLARATION_RE, `src: url("${dataUri}")`));
+    }
+    return inlined.length > 0 ? inlined.join("\n") : null;
+  }
+
+  function stripExternal(clone) {
+    const images = clone.querySelectorAll("img");
+    for (let index = 0; index < images.length; index += 1) {
+      const src = images[index].getAttribute("src");
+      if (src && !src.startsWith("data:")) images[index].removeAttribute("src");
+    }
+
+    const elements = clone.querySelectorAll("*");
+    for (let index = 0; index < elements.length; index += 1) {
+      const style = elements[index].style.cssText;
+      if (style && style.includes("url(")) {
+        elements[index].style.cssText = style.replace(
+          /url\(["']?(?!data:)[^)"']*["']?\)/gi,
+          "none",
+        );
+      }
+    }
+  }
+
+  function emitScroll() {
+    scrollRaf = 0;
+    if (!scrollForwarding) return;
+    postToTrustedTop({
+      type: "INLINE_EDIT_SCROLL",
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+    });
+  }
+
+  window.addEventListener(
+    "scroll",
+    function () {
+      if (!scrollForwarding || scrollRaf) return;
+      scrollRaf = requestAnimationFrame(emitScroll);
+    },
+    { passive: true, capture: true },
+  );
+
+  async function handleCaptureRequest(event) {
+    const requestId = event.data.requestId;
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    function postResult(dataUrl) {
+      postToTrustedTop({
+        type: "INLINE_EDIT_SCREENSHOT_RESULT",
+        requestId,
+        dataUrl,
+        scrollX,
+        scrollY,
+      });
+    }
+
+    try {
+      // Wait for any pending web fonts to resolve so both inline metrics and
+      // the @font-face inlining below see the same loaded faces.
+      if (document.fonts && document.fonts.ready) {
+        try {
+          await document.fonts.ready;
+        } catch (_error) {}
+      }
+
+      const clone = document.documentElement.cloneNode(true);
+      inlineAll(document.documentElement, clone);
+
+      const removedNodes = clone.querySelectorAll("script,link[rel=\"stylesheet\"],style");
+      for (let index = 0; index < removedNodes.length; index += 1) {
+        removedNodes[index].remove();
+      }
+
+      stripExternal(clone);
+
+      // Re-embed web fonts as data-URI @font-face rules so the SVG rasterizer
+      // can resolve them — external font URLs aren't fetched during
+      // foreignObject rendering, which would otherwise force a fallback face
+      // and change text metrics.
+      const inlinedFontCss = await buildInlinedFontCss();
+      if (inlinedFontCss) {
+        const styleEl = document.createElement("style");
+        styleEl.textContent = inlinedFontCss;
+        const head = clone.querySelector("head");
+        if (head) head.appendChild(styleEl);
+        else clone.insertBefore(styleEl, clone.firstChild);
+      }
+
+      const html = new XMLSerializer().serializeToString(clone);
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+        '<foreignObject width="100%" height="100%">' +
+        `<div xmlns="http://www.w3.org/1999/xhtml" style="width:${width}px;height:${height}px;overflow:hidden">` +
+        `<div style="position:relative;left:-${scrollX}px;top:-${scrollY}px">` +
+        html +
+        "</div></div></foreignObject></svg>";
+      const svgUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+      const image = new Image();
+      image.onload = function () {
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d").drawImage(image, 0, 0);
+        postResult(canvas.toDataURL("image/png"));
+      };
+      image.onerror = function () {
+        postResult(null);
+      };
+      image.src = svgUrl;
+    } catch (_error) {
+      postResult(null);
+    }
+  }
+
+  window.addEventListener("message", function (event) {
+    if (!event.data) return;
+    // Only accept messages from the direct parent frame. Blocks sibling /
+    // unrelated-window postMessage senders that could otherwise reach us.
+    if (event.source !== window.parent) return;
+
+    const trustedParentOrigin = getTrustedParentOrigin(event);
+    if (!trustedParentOrigin) return;
+    trustedTopOrigin = trustedParentOrigin;
+
+    if (event.data.type === "INLINE_EDIT_SCROLL_START") {
+      scrollForwarding = true;
+      emitScroll();
+      return;
+    }
+
+    if (event.data.type === "INLINE_EDIT_SCROLL_STOP") {
+      scrollForwarding = false;
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
+      scrollRaf = 0;
+      return;
+    }
+
+    if (event.data.type !== "INLINE_EDIT_CAPTURE_REQUEST") return;
+
+    handleCaptureRequest(event);
+  });
+})();
+
+
+</script></body>
 </html>
